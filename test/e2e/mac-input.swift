@@ -1,5 +1,5 @@
 // E2E input driver (CI only; never run it on a machine someone is using). Posts real CGEvents:
-// clicks TextEdit's window and types "hello" + Return, then clicks the test form's password box
+// presses Allow on the screen capture prompt if it is up, clicks TextEdit's window and types "hello" + Return, then clicks the test form's password box
 // (mac-form.swift), types the password, and clicks Submit.
 //
 //   swiftc -O -o mac-input mac-input.swift && ./mac-input /tmp/form.json
@@ -77,9 +77,48 @@ guard let w = win else {
   exit(1)
 }
 log("TextEdit window \(w)")
-func frontName() -> String { NSWorkspace.shared.frontmostApplication?.localizedName ?? "?" }
+/// The front app by AX (live; NSWorkspace only updates while a run loop turns, and this has none).
+func frontName() -> String {
+  var v: CFTypeRef?
+  var pid: pid_t = 0
+  guard AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(), kAXFocusedApplicationAttribute as CFString, &v) == .success,
+    let e = v, CFGetTypeID(e) == AXUIElementGetTypeID(), AXUIElementGetPid(e as! AXUIElement, &pid) == .success
+  else { return "?" }
+  return NSRunningApplication(processIdentifier: pid)?.localizedName ?? "?"
+}
 
-click(CGPoint(x: w.midX, y: w.midY + 20))
+/// macOS 15+ asks whether node may "bypass the private window picker" in a floating window
+/// (UserNotificationCenter) over the middle of the screen. Press its first button (Allow) by AX.
+func dismissCapturePrompt() {
+  for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.UserNotificationCenter") {
+    let ax = AXUIElementCreateApplication(app.processIdentifier)
+    var wins: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute as CFString, &wins) == .success else { continue }
+    for w in (wins as? [AXUIElement]) ?? [] {
+      var kids: CFTypeRef?
+      guard AXUIElementCopyAttributeValue(w, kAXChildrenAttribute as CFString, &kids) == .success else { continue }
+      for k in (kids as? [AXUIElement]) ?? [] {
+        var role: CFTypeRef?
+        var title: CFTypeRef?
+        AXUIElementCopyAttributeValue(k, kAXRoleAttribute as CFString, &role)
+        AXUIElementCopyAttributeValue(k, kAXTitleAttribute as CFString, &title)
+        if (role as? String) == "AXButton", (title as? String) == "Allow" {
+          log("pressing Allow on the screen capture prompt: \(AXUIElementPerformAction(k, kAXPressAction as CFString) == .success)")
+          pause(500)
+        }
+      }
+    }
+  }
+}
+
+dismissCapturePrompt()
+// Left part of the text area: clear of anything centered on screen. Rest on it first so the
+// recorder's 1 s front poll has met TextEdit before the click asks the probe about it.
+let target = CGPoint(x: w.minX + 80, y: w.minY + 120)
+CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: target, mouseButton: .left)?
+  .post(tap: .cghidEventTap)
+pause(1500)
+click(target)
 pause(800)
 // Keys typed while another app is in front would land elsewhere (a focused password box turns on
 // secure input, which hides them from every event tap): say so in the log rather than guess.
@@ -87,7 +126,7 @@ log("front after click: \(frontName())")
 if frontName() != "TextEdit" {
   NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.TextEdit").first?.activate()
   pause(800)
-  click(CGPoint(x: w.midX, y: w.midY + 20))
+  click(target)
   pause(800)
   log("front after retry: \(frontName())")
 }

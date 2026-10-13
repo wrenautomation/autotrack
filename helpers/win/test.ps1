@@ -1,5 +1,5 @@
-# Windows probe test: starts probe.ps1, opens Notepad, checks perm, front, focused, at on its edit
-# control, bad input, and `at` latency over 50 requests. Then starts `probe.ps1 --shots` and checks
+# Windows probe test: starts probe.ps1, opens its own text box window (test-form.ps1), checks perm,
+# front, focused, at on the text box, bad input, and `at` latency over 50 requests. Then starts `probe.ps1 --shots` and checks
 # displays, grab, save (JPEG, at most 1920 px), the ring and timing. Exits 1 and prints every failure.
 # Run: powershell -NoProfile -ExecutionPolicy Bypass -File test.ps1   (Windows PowerShell 5.1)
 $ErrorActionPreference = 'Stop'
@@ -34,7 +34,7 @@ $psi.RedirectStandardInput = $true
 $psi.RedirectStandardOutput = $true
 $psi.CreateNoWindow = $true
 $p = [System.Diagnostics.Process]::Start($psi)
-$notepad = $null
+$testForm = $null
 $script:nextId = 1
 $all = New-Object System.Text.StringBuilder   # every response, to prove no value leaks
 
@@ -76,15 +76,10 @@ function Test-Element($e, [string]$what) {
     }
 }
 
-function Find-Notepad {
-    $cond = New-Object System.Windows.Automation.PropertyCondition ($UIA::ClassNameProperty), 'Notepad'
-    $w = $UIA::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
-    if ($null -ne $w) { return $w }
-    # Packaged Notepad may use another window class: fall back to the title.
-    foreach ($c in $UIA::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
-        if ($c.Current.Name -match 'Notepad$') { return $c }
-    }
-    return $null
+$formTitle = 'autotrack probe test'
+function Find-TestForm {
+    $cond = New-Object System.Windows.Automation.PropertyCondition ($UIA::NameProperty), $formTitle
+    return $UIA::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
 }
 
 try {
@@ -99,29 +94,29 @@ try {
     $na = Ask @{ op = 'at' }
     Check ($null -eq $na.element) 'at without coordinates is not null'
 
-    # open Notepad (classic or the Windows 11 one; both use window class Notepad)
-    $notepad = Start-Process notepad.exe -PassThru
+    # the test's own text box window, in a process of its own (UIA into this process would wait on itself)
+    $testForm = Start-Process powershell.exe -PassThru -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'test-form.ps1')
     $win = $null
-    for ($i = 0; $i -lt 60 -and $null -eq $win; $i++) { Start-Sleep -Milliseconds 500; $win = Find-Notepad }
-    if ($null -eq $win) { throw 'Notepad window did not appear within 30 s' }
+    for ($i = 0; $i -lt 60 -and $null -eq $win; $i++) { Start-Sleep -Milliseconds 500; $win = Find-TestForm }
+    if ($null -eq $win) { throw 'test form window did not appear within 30 s' }
 
-    # front: wait until Notepad is in front, nudging focus
+    # front: wait until the form is in front, nudging focus
     $front = $null
     for ($i = 0; $i -lt 20; $i++) {
         try { [void][TestNative]::SetForegroundWindow([IntPtr]$win.Current.NativeWindowHandle); $win.SetFocus() } catch { }
         Start-Sleep -Milliseconds 300
         $front = Ask @{ op = 'front' }
-        if ($front.app -and $front.app.name -match 'notepad') { break }
+        if ($front.window -and $front.window.title -eq $formTitle) { break }
     }
     if ($null -eq $front.app) { Fail 'front has no app' }
     else {
-        Check ($front.app.name -match 'notepad') "front app is '$($front.app.name)', not Notepad"
-        Check ($front.app.id -match 'notepad') "front app id '$($front.app.id)' is not Notepad's exe path"
-        Check ($front.app.pid -gt 0) 'front app pid is not positive'
+        Check ($front.app.name -match 'powershell') "front app is '$($front.app.name)', not the test form's powershell"
+        Check ($front.app.id -match 'powershell\.exe$') "front app id '$($front.app.id)' is not powershell's exe path"
+        Check ($front.app.pid -eq $testForm.Id) "front app pid $($front.app.pid) is not the test form's ($($testForm.Id))"
     }
     if ($null -eq $front.window) { Fail 'front has no window' }
     else {
-        Check ($front.window.title -is [string] -and $front.window.title -match 'Notepad') "front window title is '$($front.window.title)'"
+        Check ($front.window.title -eq $formTitle) "front window title is '$($front.window.title)'"
         Check ($front.window.width -gt 0 -and $front.window.height -gt 0) 'front window has no size'
     }
 
@@ -132,24 +127,22 @@ try {
     $foc = Ask @{ op = 'focused' }
     Test-Element $foc.element 'focused element'
     if ($foc.element) {
-        Check ($foc.element.role -match '^(edit|document)$') "focused role is '$($foc.element.role)', expected edit or document"
-        Check ($foc.element.secure -eq $false) 'Notepad edit control reported secure'
+        Check ($foc.element.role -eq 'edit') "focused role is '$($foc.element.role)', expected edit"
+        Check ($foc.element.secure -eq $false) 'the text box reported secure'
     }
 
-    $or = New-Object System.Windows.Automation.OrCondition (
-        (New-Object System.Windows.Automation.PropertyCondition ($UIA::ControlTypeProperty), ([System.Windows.Automation.ControlType]::Edit)),
-        (New-Object System.Windows.Automation.PropertyCondition ($UIA::ControlTypeProperty), ([System.Windows.Automation.ControlType]::Document)))
-    $edit = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $or)
-    if ($null -eq $edit) { Fail 'no Edit or Document control found in Notepad' }
+    $cond = New-Object System.Windows.Automation.PropertyCondition ($UIA::ControlTypeProperty), ([System.Windows.Automation.ControlType]::Edit)
+    $edit = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+    if ($null -eq $edit) { Fail 'no Edit control found in the test form' }
     else {
         $r = $edit.Current.BoundingRectangle
         $cx = [int]($r.X + $r.Width / 2); $cy = [int]($r.Y + $r.Height / 2)
         $at = Ask @{ op = 'at'; x = $cx; y = $cy }
         Test-Element $at.element "at($cx,$cy)"
         if ($at.element) {
-            Check ($at.element.role -match '^(edit|document)$') "at role is '$($at.element.role)', expected edit or document"
-            Check ($at.element.secure -eq $false) 'at: Notepad edit control reported secure'
-            Check ($at.element.cls -is [string] -and $at.element.cls.Length -gt 0) 'at: Notepad edit control has no cls (UIA ClassName)'
+            Check ($at.element.role -eq 'edit') "at role is '$($at.element.role)', expected edit"
+            Check ($at.element.secure -eq $false) 'at: the text box reported secure'
+            Check ($at.element.cls -is [string] -and $at.element.cls.Length -gt 0) 'at: the text box has no cls (UIA ClassName)'
             $e = $at.element
             Check ($cx -ge $e.x -and $cx -le ($e.x + $e.width) -and $cy -ge $e.y -and $cy -le ($e.y + $e.height)) "at($cx,$cy) bounds ($($e.x),$($e.y),$($e.width),$($e.height)) do not contain the point"
         }
@@ -159,7 +152,7 @@ try {
     $far = Ask @{ op = 'at'; x = 900000; y = 900000 }
     Check ($far.PSObject.Properties['element'] -ne $null) 'at off-screen has no element field'
 
-    # latency: 50 `at` requests across Notepad's window
+    # latency: 50 `at` requests across the form's window
     $ms = New-Object System.Collections.ArrayList
     $w = $front.window
     for ($i = 0; $i -lt 50; $i++) {
@@ -183,7 +176,7 @@ finally {
     try { $p.StandardInput.Close() } catch { }
     if (-not $p.WaitForExit(5000)) { Fail 'probe did not exit after stdin closed'; $p.Kill() }
     elseif ($p.ExitCode -ne 0) { Fail "probe exit code $($p.ExitCode)" }
-    if ($notepad) { Get-Process -Name notepad -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue }
+    if ($testForm -and -not $testForm.HasExited) { Stop-Process -Id $testForm.Id -Force -ErrorAction SilentlyContinue }
 }
 
 # ---- shots mode: displays, grab, save, ring, bad input (`probe.ps1 --shots`) ----
