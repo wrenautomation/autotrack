@@ -1,0 +1,31 @@
+{
+  "name": "@wrenautomation/track",
+  "version": "0.1.0",
+  "description": "Records every input and the screen around it on Mac and Windows, for computer-use training data.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "wren-track": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "track": "node --experimental-strip-types src/cli.ts"
+  },
+  "dependencies": {
+    "koffi": "2.16.3",
+    "node-screenshots": "0.2.8",
+    "uiohook-napi": "1.5.5"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.3",
+    "typescript": "5.9.3",
+    "vitest": "5.0.1"
+  },
+  "license": "PolyForm-Strict-1.0.0"
+}
