@@ -2,9 +2,11 @@
 /**
  * Service worker. Stamps each event from a content script with its tab and frame, fills an
  * effect event's `requests` from webRequest once its window has closed (plus 250 ms for late
- * finishes), and hands events to the native host.
+ * finishes), holds page snapshots to one per tab per 2 s, and hands events to the native host.
+ * Navigations, searches, tab changes and downloads are the browser's own events (browse.js).
  */
 import "../content/redact.js";
+import { Gate, watch } from "./browse.js";
 import { HOST, Native } from "./native.js";
 import { Requests } from "./requests.js";
 
@@ -15,6 +17,9 @@ const native = new Native({
   lastError: () => chrome.runtime.lastError?.message,
 });
 
+const snapshots = new Gate();
+watch(chrome, { push: (ev) => native.push(ev), redact: R });
+
 const ALL = { urls: ["<all_urls>"] };
 chrome.webRequest.onBeforeRequest.addListener((d) => {
   requests.start(d);
@@ -22,7 +27,10 @@ chrome.webRequest.onBeforeRequest.addListener((d) => {
 }, ALL);
 chrome.webRequest.onCompleted.addListener((d) => requests.end(d, d.statusCode), ALL);
 chrome.webRequest.onErrorOccurred.addListener((d) => requests.end(d, 0), ALL);
-chrome.tabs?.onRemoved?.addListener((tab) => requests.forget(tab));
+chrome.tabs?.onRemoved?.addListener((tab) => {
+  requests.forget(tab);
+  snapshots.forget(tab);
+});
 
 chrome.runtime.onMessage.addListener((msg, sender) => {
   const ev = msg?.autotrack;
@@ -30,6 +38,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   if (ev.kind !== "web" && ev.kind !== "app") return;
   ev.tab = sender.tab.id;
   ev.frame = sender.frameId ?? 0;
+  if (ev.act === "snapshot") return snapshots.offer(ev.tab, ev, (e) => native.push(e));
   if (ev.act !== "effect") return native.push(ev);
   const from = Number(ev.cause?.ts) || ev.ts;
   const wait = Math.max(0, from + 1250 - Date.now());

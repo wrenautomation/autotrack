@@ -1,6 +1,6 @@
 # autotrack extension
 
-A Chrome and Edge extension (MV3) that records clicks, form changes, key shortcuts, scrolls and app events with full element detail. It hands them to the autotrack recorder through a native messaging host (`../host`). What it captures and what it redacts is in [PRIVACY.md](PRIVACY.md). The contract is `autobrowse/designs/2026-10-13-track.md`, layers 2 and 3.
+A Chrome and Edge extension (MV3) that records clicks, form changes, key shortcuts, scrolls, app events, navigation, searches, tabs, copy and paste, selections, downloads, console errors and a text outline of the page. It hands them to the autotrack recorder through a native messaging host (`../host`). What it captures and what it redacts is in [PRIVACY.md](PRIVACY.md). The contract is `autobrowse/designs/2026-10-13-track.md`, layers 2 and 3.
 
 Extension id: `colpoheiepckdglfmebejhelggjikjim`.
 
@@ -11,11 +11,19 @@ Extension id: `colpoheiepckdglfmebejhelggjikjim`.
 | `main.js` | page (MAIN world) | reads React component names from the fiber tree, answers only on the nonce channel |
 | `content/redact.js` | content script | secret field and value redaction, URL redaction |
 | `content/hints.js` | content script | element target: role, name, CSS path, XPath, attrs, field values |
-| `content/bridge.js` | content script | nonce handshake with `main.js`, validates replies |
-| `content/content.js` | content script | listeners, screen points, the 1 s effect window, app events |
+| `content/outline.js` | content script | the visible page as an aria outline in text, bounded, no field values |
+| `content/bridge.js` | content script | nonce handshake with `main.js`, validates replies and error reports |
+| `content/content.js` | content script | listeners, screen points, the 1 s effect window, copy/paste/select, snapshots, app events |
 | `sw/sw.js` | service worker | stamps tab and frame, joins effects to `webRequest` data, sends |
+| `sw/browse.js` | service worker | navigation, search, tab and download events from the browser APIs; the snapshot gate |
 | `sw/native.js` | service worker | batches to the host, backoff, pause, missing host |
 | `sw/requests.js` | service worker | per tab request history for effects |
+
+## Events beyond the page
+
+`nav`, `search`, `tab` and `download` come from the service worker (`webNavigation`, `tabs`, `downloads`), with no page script. `copy`, `cut`, `paste`, `select` and `snapshot` come from the content script. `snapshot` is top frame only. The effect event's `effects.errors` lists console errors, uncaught errors and rejections from the 1 s window. `main.js` reports them on a third nonce channel.
+
+A downloaded file has no tab of its own, so a download is attributed to the active tab. Snapshots are capped so one fits the recorder's 64 KB control line.
 
 Content scripts run in all frames, from `document_start`, including `about:blank` frames.
 

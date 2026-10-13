@@ -3,26 +3,34 @@
  * The isolated-world recorder, one per frame. On each trusted pointer down, click, double click,
  * context menu, field change, submit, key (with ctrl/alt/meta, or Enter/Escape/Tab) and scroll
  * end it sends a `web` event to the service worker. One second after an act (or sooner, at the
- * next act or page hide) it sends `act: "effect"`: the URL if it changed and DOM mutation
- * counts; the service worker adds the network requests. `window.postMessage({autotrack:{v:1,
- * action, detail}})` from the page becomes an `app` event after validation.
+ * next act or page hide) it sends `act: "effect"`: the URL if it changed, DOM mutation counts and
+ * the page's errors in that window; the service worker adds the network requests. Copy, cut and
+ * paste carry their text, a mouse-up selection its text (all redacted). In the top frame, a
+ * `snapshot` of the page outline goes out on load and after an effect with more than 20 DOM
+ * changes. `window.postMessage({autotrack:{v:1, action, detail}})` from the page becomes an `app`
+ * event after validation.
  *
  * Screen points: Chrome's `screenX/screenY` are DIPs, which are OS points on Mac and logical
  * pixels (physical ÷ display scale) on Windows, unaffected by page zoom. Client (CSS px)
  * coordinates map to screen as `offset + client × zoom`, where offset and zoom come from the
  * latest pointer events in this frame (see `calibrate`).
  *
- * Needs redact.js, hints.js and bridge.js loaded first.
+ * Needs redact.js, hints.js, outline.js and bridge.js loaded first.
  */
 (() => {
   const AT = /** @type {any} */ (globalThis).__autotrack;
   if (!AT || AT.started) return;
   AT.started = true;
-  const { hints, redact, bridge } = AT;
+  const { hints, redact, bridge, outline } = AT;
   /** Tests swap this; in Chrome only real input counts. @type {(e: Event) => boolean} */
   const trusted = AT.trusted || ((e) => e.isTrusted);
   const EFFECT_MS = 1000;
   const SCROLL_IDLE_MS = 250;
+  const SNAPSHOT_GAP_MS = 2000;
+  const SNAPSHOT_DOM_CHANGES = 20;
+  const ERRORS_PER_WINDOW = 10;
+  const CLIP_MAX = 2000;
+  const SELECT_MAX = 500;
   const ZOOMS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5];
 
   let alive = true;
@@ -108,10 +116,11 @@
   }
 
   // ---- effects: one open window at a time ----
-  /** @type {{act:string, ts:number, url:string, added:number, removed:number, textChanged:number, timer:any, mo:MutationObserver|null}|null} */
+  /** @type {{act:string, ts:number, url:string, added:number, removed:number, textChanged:number, errors:{message:string, source:string}[], timer:any, mo:MutationObserver|null}|null} */
   let win = null;
 
-  function closeEffect() {
+  /** @param {boolean} [settled] false at page hide: the page is going, no outline of it. */
+  function closeEffect(settled = true) {
     const w = win;
     if (!w) return;
     win = null;
@@ -125,11 +134,22 @@
     const effects = {
       requests: [],
       dom: { added: w.added, removed: w.removed, textChanged: w.textChanged },
+      errors: w.errors,
     };
     const url = redact.redactUrl(location.href);
     if (url !== w.url) effects.url = url;
     send({ ...base("effect", ts), cause: { act: w.act, ts: w.ts }, effects });
+    if (settled && w.added + w.removed + w.textChanged > SNAPSHOT_DOM_CHANGES) snapshot();
   }
+
+  // Errors the page world reports (console.error, uncaught, unhandled rejection) while a window is open.
+  bridge?.onError?.((/** @type {{source: string, message: string}} */ e) => {
+    const w = win;
+    if (!w || w.errors.length >= ERRORS_PER_WINDOW) return;
+    const message = redact.redactText(e.message).slice(0, 200);
+    if (!message || w.errors.some((x) => x.message === message && x.source === e.source)) return;
+    w.errors.push({ message, source: e.source });
+  });
 
   /** @param {any} w @param {MutationRecord[]} records */
   function count(w, records) {
@@ -153,6 +173,7 @@
       added: 0,
       removed: 0,
       textChanged: 0,
+      errors: [],
       mo: null,
     };
     try {
@@ -163,14 +184,17 @@
     win = w;
   }
 
+  /** Acts that watch rather than do: they leave an open effect window alone. */
+  const PASSIVE = new Set(["scroll", "select", "copy"]);
+
   /**
-   * Record an act. `effect` opens the 1 s effect window; every act but scroll closes the
+   * Record an act. `effect` opens the 1 s effect window; every act but a passive one closes the
    * previous one.
    * @param {Record<string, any>} ev
    * @param {boolean} effect
    */
   function act(ev, effect) {
-    if (ev.act !== "scroll") closeEffect();
+    if (!PASSIVE.has(ev.act)) closeEffect();
     send(ev);
     if (effect) openEffect(ev.act, ev.ts);
   }
@@ -342,10 +366,151 @@
     () => {
       flushTyping();
       endScroll();
-      closeEffect();
+      closeEffect(false);
     },
     opts,
   );
+
+  // ---- clipboard and selection ----
+  /** @param {Element} el */
+  const isTextField = (el) => hints.isField(el) || hints.isEditable(el);
+
+  /**
+   * Clipboard or selected text through redaction. A secret field gives no text at all; a single
+   * secret-shaped token is masked whole, other secret-shaped parts are masked in place.
+   * @param {string} text @param {Element|null} field @param {number} max
+   * @returns {{text?: string, length?: number, redacted?: true}}
+   */
+  function clip(text, field, max) {
+    if (field && hints.secret(field)) return { redacted: true };
+    const length = text.length;
+    const cut = text.slice(0, max);
+    if (cut && !/\s/.test(cut.trim()) && redact.looksLikeSecretValue(cut))
+      return { redacted: true, length };
+    const masked = redact.redactText(cut);
+    return masked === cut ? { text: masked, length } : { text: masked, length, redacted: true };
+  }
+
+  /** The selected text inside a field, if the field says (not every input type does). @param {Element} el */
+  function fieldSelection(el) {
+    try {
+      const f = /** @type {HTMLInputElement} */ (el);
+      if (typeof f.selectionStart === "number" && typeof f.selectionEnd === "number")
+        return f.value.slice(f.selectionStart, f.selectionEnd);
+    } catch {}
+    return "";
+  }
+
+  /**
+   * What is selected now and in which element: a field's own selection, else the page's.
+   * @returns {{text: string, el: Element, field: Element|null}|null}
+   */
+  function selected() {
+    const a = document.activeElement;
+    if (a && hints.isField(a)) {
+      const text = fieldSelection(a);
+      if (text) return { text, el: a, field: a };
+    }
+    const sel = getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+    const text = sel.toString();
+    if (!text) return null;
+    const n = sel.getRangeAt(0).commonAncestorContainer;
+    const el = n.nodeType === 1 ? /** @type {Element} */ (n) : n.parentElement;
+    if (!el) return null;
+    return { text, el, field: a && isTextField(a) && a.contains(el) ? a : null };
+  }
+
+  /** @param {ClipboardEvent} e @param {"copy"|"cut"|"paste"} name */
+  function clipboard(e, name) {
+    if (!trusted(e)) return;
+    const hit = origin(e);
+    const sel = name === "paste" ? null : selected();
+    const el = hit && isTextField(hit) ? hit : sel?.el || hit;
+    if (!el) return;
+    const field = isTextField(el) ? el : sel?.field || null;
+    const ev = { ...base(name, tsOf(e)), target: target(el) };
+    if (name === "paste") {
+      const data = e.clipboardData;
+      Object.assign(ev, clip(data?.getData("text/plain") || "", field, CLIP_MAX));
+      Object.assign(ev, { types: [...(data?.types || [])].slice(0, 8) });
+    } else {
+      const text = field && hints.isField(field) ? fieldSelection(field) : sel?.text || "";
+      // Nothing selected: nothing went to the clipboard (a secret field still says so).
+      if (!text && !(field && hints.secret(field))) return;
+      Object.assign(ev, clip(text, field, CLIP_MAX));
+    }
+    act(ev, name !== "copy");
+  }
+  for (const name of /** @type {const} */ (["copy", "cut", "paste"]))
+    addEventListener(name, (e) => clipboard(/** @type {ClipboardEvent} */ (e), name), opts);
+
+  // A select is a gesture that changed the selection: the text at mouse up differs from the text
+  // at mouse down. A click on a button with something still selected is not one.
+  let selBefore = "";
+  /** @param {{text: string}|null} sel */
+  const selText = (sel) => (sel ? sel.text.replace(/\s+/g, " ").trim() : "");
+  addEventListener(
+    "mousedown",
+    (e) => {
+      if (trusted(e)) selBefore = selText(selected());
+    },
+    opts,
+  );
+  addEventListener(
+    "mouseup",
+    (e) => {
+      if (!trusted(e)) return;
+      calibrate(e);
+      const sel = selected();
+      const text = selText(sel);
+      if (!sel || !text || text === selBefore) {
+        selBefore = text;
+        return;
+      }
+      selBefore = text;
+      const ev = {
+        ...base("select", tsOf(e)),
+        x: r1(e.screenX),
+        y: r1(e.screenY),
+        target: target(sel.el),
+        ...clip(text, sel.field, SELECT_MAX),
+      };
+      act(ev, false);
+    },
+    opts,
+  );
+
+  // ---- page outline ----
+  // Top frame only. At most one per 2 s: a request inside the gap waits for its end.
+  const isTop = (() => {
+    try {
+      return window === window.top;
+    } catch {
+      return false;
+    }
+  })();
+  let lastSnapshot = 0;
+  /** @type {any} */
+  let snapshotTimer = null;
+  function snapshot() {
+    if (!isTop || !outline || !alive) return;
+    const wait = lastSnapshot + SNAPSHOT_GAP_MS - Date.now();
+    if (wait > 0) {
+      if (!snapshotTimer) snapshotTimer = setTimeout(snapshot, wait);
+      return;
+    }
+    clearTimeout(snapshotTimer);
+    snapshotTimer = null;
+    lastSnapshot = Date.now();
+    let tree = "";
+    try {
+      tree = outline.snapshot(document);
+    } catch {}
+    if (tree) send({ ...base("snapshot", lastSnapshot), tree });
+  }
+  if (document.readyState === "complete") snapshot();
+  else addEventListener("load", () => snapshot(), { once: true });
 
   // ---- app events ----
   const APP_MAX = 4096;

@@ -74,6 +74,31 @@ const PAGE = `<!doctype html><html><head><title>autotrack e2e</title></head><bod
   createRoot(document.getElementById("root")).render(h(App));
 </script></body></html>`;
 
+const SIGNAL_PAGE = `<!doctype html><html><head><title>Signal e2e</title></head><body>
+<nav aria-label="Main"><a id="next" href="/next">Next page</a> <a id="dl" href="/file.zip">Get the zip</a></nav>
+<main>
+  <h1>Quarterly report</h1>
+  <p id="para">Invoice 4411 is due Friday for Acme Plumbing.</p>
+  <p id="key">Our key is sk-abcdefghijklmnopqrstuvwxyz for the demo.</p>
+  <label for="note">Note</label><textarea id="note"></textarea>
+  <label for="pw">Password</label><input id="pw" type="password" value="hunter2-SECRET">
+  <button id="boom">Save</button>
+  <ul id="rows"></ul>
+</main>
+<script>
+  document.getElementById("boom").addEventListener("click", () => {
+    console.error("Save failed: HTTP 500", { id: 1 });
+    setTimeout(() => { throw new TypeError("x.save is not a function"); }, 50);
+    Promise.reject(new Error("sync rejected"));
+    const rows = document.getElementById("rows");
+    for (let i = 0; i < 30; i++) {
+      const li = document.createElement("li");
+      li.textContent = "Row " + i;
+      rows.append(li);
+    }
+  });
+</script></body></html>`;
+
 let tmp;
 let sock;
 let lines;
@@ -111,6 +136,15 @@ beforeAll(async () => {
       return r.end(readFileSync(FILES[decodeURIComponent(q.url.slice(3))]));
     }
     if (q.url.startsWith("/api/")) return r.end('{"ok":true}');
+    if (q.url.startsWith("/file.zip")) {
+      r.setHeader("content-type", "application/zip");
+      r.setHeader("content-disposition", 'attachment; filename="private-name.zip"');
+      return r.end(Buffer.alloc(2048, 1));
+    }
+    if (q.url.startsWith("/signal") || q.url.startsWith("/next") || q.url.startsWith("/find")) {
+      r.setHeader("content-type", "text/html");
+      return r.end(SIGNAL_PAGE);
+    }
     r.setHeader("content-type", "text/html");
     r.end(PAGE);
   });
@@ -129,6 +163,10 @@ beforeAll(async () => {
     channel: "chromium",
     headless: true,
     args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`],
+    acceptDownloads: true,
+  });
+  await ctx.grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: `http://127.0.0.1:${web.address().port}`,
   });
 }, 60_000);
 
@@ -231,3 +269,181 @@ it("records a React click, typing, a password and an app event through the nativ
 
   expect(rawText).not.toMatch(/hunter2|SECRET|OAUTHCODE/);
 });
+
+it("records navigation, search, tabs, copy/paste/select, a download, console errors and snapshots", async () => {
+  const base = `http://127.0.0.1:${web.address().port}`;
+  const mark = lines.length;
+  const since = () =>
+    lines
+      .slice(mark)
+      .filter((l) => l.op === "web")
+      .map((l) => l.event);
+  const until = async (pred, what) => {
+    for (let i = 0; i < 100; i++) {
+      if (since().some(pred)) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const seen = since()
+      .map((e) => e.act)
+      .join(",");
+    throw new Error(`never saw ${what}; saw: ${seen}`);
+  };
+
+  const page = await ctx.newPage();
+  await page.goto(`${base}/signal?code=OAUTHCODE&tab=2`);
+  await page.getByText("Quarterly report").waitFor();
+  await until((e) => e.act === "snapshot", "the load snapshot");
+
+  // Navigation: a link click, then a search URL typed as a navigation, then back.
+  await page.click("#next");
+  await page.waitForURL(`${base}/next`);
+  await page.goto(`${base}/find?q=best+crm+for+roofers`);
+  await page.goBack();
+  await until((e) => e.act === "nav" && e.transition === "back_forward", "a back navigation");
+
+  // Selection and clipboard.
+  await page.goto(`${base}/signal`);
+  await page.getByText("Quarterly report").waitFor();
+  await page.dblclick("#para", { position: { x: 15, y: 8 } });
+  await page.evaluate(() => {
+    const r = document.createRange();
+    r.selectNodeContents(document.getElementById("para"));
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+  });
+  await page.keyboard.press("ControlOrMeta+c");
+  await page.click("#note");
+  await page.keyboard.press("ControlOrMeta+v");
+  await page.evaluate(() =>
+    navigator.clipboard.writeText("sk-abcdefghijklmnopqrstuvwxyz and Friday"),
+  );
+  await page.keyboard.press("ControlOrMeta+v");
+  await page.click("#pw");
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.press("ControlOrMeta+c");
+  await page.evaluate(() => {
+    const r = document.createRange();
+    r.selectNodeContents(document.getElementById("key"));
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+  });
+  await page.mouse.move(5, 5);
+
+  // An effect with console errors, an uncaught error, a rejection and 30 new rows.
+  await page.click("#boom");
+  await until(
+    (e) => e.act === "effect" && e.effects?.errors?.length >= 3,
+    "the effect with errors",
+  );
+  await until(
+    (e) => e.act === "snapshot" && e.tree.includes("Row 0"),
+    "the snapshot after the effect",
+  );
+
+  // A download, then a second tab opened, switched to and closed.
+  const dl = page.waitForEvent("download");
+  await page.click("#dl");
+  await (await dl).path();
+  await until((e) => e.act === "download", "the download");
+  const tab2 = await ctx.newPage();
+  await tab2.goto(`${base}/next`);
+  await page.bringToFront();
+  await tab2.close();
+  await until((e) => e.act === "tab" && e.op === "close", "the tab close");
+  await new Promise((r) => setTimeout(r, 2500));
+
+  const evs = since();
+  if (process.env.AUTOTRACK_E2E_OUT)
+    writeFileSync(
+      `${process.env.AUTOTRACK_E2E_OUT}.signal`,
+      evs.map((e) => JSON.stringify(e)).join("\n"),
+    );
+  const of = (act) => evs.filter((e) => e.act === act);
+  const tabId = of("snapshot")[0].tab;
+
+  // nav
+  const navs = of("nav");
+  const toNext = navs.find((e) => e.url === `${base}/next`);
+  expect(toNext).toMatchObject({ kind: "web", tab: tabId, frame: 0, transition: "link" });
+  expect(toNext.from).toBe(`${base}/signal?code=%3Credacted%3E&tab=2`);
+  expect(navs.find((e) => e.transition === "back_forward")).toMatchObject({ url: `${base}/next` });
+  expect(navs.find((e) => e.url.includes("/signal?code=")).url).not.toContain("OAUTHCODE");
+
+  // search
+  expect(of("search")).toEqual([
+    expect.objectContaining({
+      kind: "web",
+      engine: "127.0.0.1",
+      query: "best crm for roofers",
+      tab: tabId,
+      frame: 0,
+    }),
+  ]);
+
+  // select, copy, paste
+  expect(of("select")[0]).toMatchObject({ text: "Invoice", target: { tag: "p", id: "para" } });
+  const copies = of("copy");
+  expect(copies[0]).toMatchObject({
+    text: "Invoice 4411 is due Friday for Acme Plumbing.",
+    target: { id: "para" },
+  });
+  // Chrome may not even fire copy on a password field; if it does, the text is withheld.
+  for (const c of copies.filter((c) => c.target.id === "pw")) {
+    expect(c.redacted).toBe(true);
+    expect(c.text).toBeUndefined();
+  }
+  const pastes = of("paste");
+  expect(pastes).toHaveLength(2);
+  expect(pastes[1]).toMatchObject({
+    text: "<redacted> and Friday",
+    redacted: true,
+    target: { id: "note" },
+  });
+
+  // effect errors
+  const boom = of("effect").find((e) => e.effects.errors.length);
+  expect(boom.effects.errors).toEqual(
+    expect.arrayContaining([
+      { source: "console", message: expect.stringContaining("Save failed: HTTP 500") },
+      { source: "uncaught", message: "TypeError: x.save is not a function" },
+      { source: "rejection", message: "Error: sync rejected" },
+    ]),
+  );
+  expect(
+    of("effect")
+      .filter((e) => e !== boom)
+      .every((e) => Array.isArray(e.effects.errors)),
+  ).toBe(true);
+
+  // snapshot
+  const snaps = of("snapshot");
+  expect(snaps[0].tree).toContain('- heading "Quarterly report" [level=1]');
+  expect(snaps[0].tree).toContain('- link "Next page"');
+  expect(snaps[0].tree).toContain('- textbox "Password"');
+  expect(snaps[0].tree.length).toBeLessThanOrEqual(30000);
+  const after = snaps.find((e) => e.tree.includes("Row 0"));
+  expect(after.tab).toBe(tabId);
+  expect(after.ts - snaps[0].ts).toBeGreaterThanOrEqual(0);
+  for (const sn of snaps) expect(sn.tree).not.toMatch(/hunter2|SECRET|abcdefghij/);
+
+  // download: metadata only
+  expect(of("download")).toEqual([
+    expect.objectContaining({
+      kind: "web",
+      ext: "zip",
+      mime: "application/zip",
+      bytes: 2048,
+      origin: base,
+      state: "complete",
+    }),
+  ]);
+
+  // tab
+  const tabs = of("tab");
+  expect(tabs.map((e) => e.op)).toEqual(expect.arrayContaining(["open", "switch", "close"]));
+  for (const t of tabs) expect(typeof t.count).toBe("number");
+
+  // Nothing private anywhere on the wire.
+  const wire = evs.map((e) => JSON.stringify(e)).join("\n");
+  expect(wire).not.toMatch(/hunter2|OAUTHCODE|private-name|abcdefghijklmnopqrstuvwxyz/);
+}, 120_000);

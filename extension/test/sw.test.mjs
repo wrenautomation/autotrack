@@ -198,7 +198,12 @@ describe("manifest", () => {
     const { readFileSync } = await import("node:fs");
     const m = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
     expect(m.manifest_version).toBe(3);
-    expect(m.permissions.sort()).toEqual(["nativeMessaging", "webRequest"]);
+    expect(m.permissions.sort()).toEqual([
+      "downloads",
+      "nativeMessaging",
+      "webNavigation",
+      "webRequest",
+    ]);
     expect(m.host_permissions).toEqual(["<all_urls>"]);
     expect(m.incognito).toBe("not_allowed");
     const [main, iso] = m.content_scripts;

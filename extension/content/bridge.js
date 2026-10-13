@@ -11,6 +11,10 @@
  * reply read synchronously. The reply is untrusted page-world data: a list of short strings or
  * nothing.
  *
+ * Errors come the other way: main.js dispatches `autotrack-e-<nonce>` on the document with
+ * `{source, message}` as a JSON string; `onError(fn)` hands each valid one to `fn`. Also untrusted
+ * data: the source must be one of three words and the message is cut to 200 chars.
+ *
  * Classic script; sets `globalThis.__autotrack.bridge`.
  */
 (() => {
@@ -21,6 +25,7 @@
   const nonce = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
   const Q = `autotrack-q-${nonce}`;
   const R = `autotrack-r-${nonce}`;
+  const E = `autotrack-e-${nonce}`;
 
   /** @type {string|null} */
   let reply = null;
@@ -78,5 +83,28 @@
     }
   }
 
-  AT.bridge = { react };
+  const SOURCES = new Set(["console", "uncaught", "rejection"]);
+  /** @type {((e: {source: string, message: string}) => void)[]} */
+  const errorHandlers = [];
+  document.addEventListener(
+    E,
+    (e) => {
+      const d = /** @type {CustomEvent} */ (e).detail;
+      if (typeof d !== "string" || d.length > 1024 || !errorHandlers.length) return;
+      try {
+        const v = JSON.parse(d);
+        if (!v || typeof v.message !== "string" || !SOURCES.has(v.source)) return;
+        const err = { source: v.source, message: v.message.slice(0, 200) };
+        for (const f of errorHandlers) f(err);
+      } catch {}
+    },
+    true,
+  );
+
+  /** @param {(e: {source: string, message: string}) => void} fn */
+  function onError(fn) {
+    errorHandlers.push(fn);
+  }
+
+  AT.bridge = { react, onError };
 })();

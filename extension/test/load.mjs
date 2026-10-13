@@ -8,6 +8,7 @@ const ext = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const ISOLATED = [
   "content/redact.js",
   "content/hints.js",
+  "content/outline.js",
   "content/bridge.js",
   "content/content.js",
 ];
@@ -15,7 +16,7 @@ export const source = (file) => readFileSync(join(ext, file), "utf8");
 
 /**
  * @param {string} html
- * @param {{trusted?: boolean, order?: "main-first"|"isolated-first"|"isolated-only", files?: string[], url?: string}} [o]
+ * @param {{trusted?: boolean, order?: "main-first"|"isolated-first"|"isolated-only", files?: string[], url?: string, setup?: (w: any) => void}} [o]
  */
 export function page(html, o = {}) {
   const dom = new JSDOM(html, {
@@ -36,6 +37,7 @@ export function page(html, o = {}) {
   };
   // Synthetic events are never trusted in jsdom; tests opt in to treating them as real input.
   if (o.trusted !== false) w.__autotrack = { trusted: () => true };
+  o.setup?.(w);
   const order = o.order ?? "main-first";
   const files = o.files ?? ISOLATED;
   if (order === "main-first") w.eval(source("main.js"));

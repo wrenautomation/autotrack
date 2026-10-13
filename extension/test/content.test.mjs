@@ -91,7 +91,8 @@ describe("acts", () => {
     doc.getElementById("i").dispatchEvent(new w.Event("change", { bubbles: true }));
     doc.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await sleep(20);
-    expect(sent).toEqual([]);
+    // The load snapshot is the page's own, not an act.
+    expect(sent.filter((e) => e.act !== "snapshot")).toEqual([]);
   });
 
   it("records a click with screen points, target, React chain and rect", () => {
