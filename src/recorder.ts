@@ -58,6 +58,12 @@ export const SHIP_MS = 5 * 60_000;
  */
 export const AT_MS = 3000;
 export const AT_WAIT_MS = 1000;
+/**
+ * The pointer still this long: its element is asked for then. A click there whose own answer has
+ * no role (a button that closes its window on release can be gone before the helper reads it)
+ * takes this one.
+ */
+export const REST_MS = 100;
 /** Trees: at most one a second. */
 export const TREE_MIN_MS = 1000;
 /** An incoming `tree` string over this many bytes is stored as `trees/<n>.txt`. */
@@ -130,6 +136,10 @@ export interface Status {
   rssMb: number;
 }
 
+/** Within 2 px: the same resting point. */
+const near = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+  Math.abs(a.x - b.x) <= 2 && Math.abs(a.y - b.y) <= 2;
+
 /** Ctrl+Alt+Shift+<key>. */
 const hotkey = (r: Raw, key: string) =>
   r.type === "keydown" &&
@@ -190,6 +200,9 @@ export class Recorder {
   private treeAt = Number.NEGATIVE_INFINITY;
   private prompting = false;
   private lastRaw = Number.NEGATIVE_INFINITY;
+  /** Where the pointer rests, since when, and its element once asked. */
+  private rest: { x: number; y: number; t: number; answer?: Promise<AtAnswer | null> } | null =
+    null;
   private chain: Promise<void> = Promise.resolve();
   private deferred: { t: number; fn: () => void }[] = [];
   private stopHook: (() => void) | null = null;
@@ -354,12 +367,28 @@ export class Recorder {
     this.lastRaw = this.clock.now();
     if (this.paused) return;
     this.screen.input(...(r.type === "keydown" ? [] : ([r.x, r.y] as const)));
+    if (r.type === "move" && !(this.rest && near(this.rest, r)))
+      this.rest = { x: r.x, y: r.y, t: this.clock.now() };
     this.folder.push({ ...r, t: this.t(r.t) } as Raw);
+    if (r.type === "down") this.rest = null; // the click may change what is there
+  }
+
+  /** Ask for the element under a pointer that has rested REST_MS. */
+  private restTick(): void {
+    const r = this.rest;
+    if (!r || r.answer || this.clock.now() - r.t < REST_MS) return;
+    if (this.paused || !this.d.probe.running) {
+      this.rest = null;
+      return;
+    }
+    const p = this.coords().toPhysical(r.x, r.y);
+    r.answer = this.d.probe.at(p.x, p.y, AT_MS);
   }
 
   foldTick(): void {
     this.folder.tick(this.t(this.clock.now()));
     this.release(this.folder.pendingSince);
+    this.restTick();
     if (this.treeWanted)
       this.treeTick().catch((e) => this.d.log?.(`tree: ${(e as Error).message}`));
   }
@@ -454,6 +483,13 @@ export class Recorder {
     if (b.on === "point") {
       at = c.toPhysical(b.x, b.y);
       target = this.d.probe.at(at.x, at.y, AT_MS);
+      const rested = this.rest?.answer && near(this.rest, b) ? this.rest.answer : null;
+      if (rested)
+        target = target.then(async (a) => {
+          if (a?.element?.role) return a;
+          const r = await rested;
+          return r?.element?.role ? r : a;
+        });
     } else target = this.d.probe.focused();
     return {
       before: this.screen.before(),

@@ -134,7 +134,9 @@ stall in the hook. A click's `at` is the exception: it is asked at the click wit
 could see the screen after the click).
 A null is asked again when the act is written, with `"wait":1000`, which raises the Mac helper's
 AX timeout to match (an app taking focus, or a password field turning on secure input, misses
-40 ms; asked again at once, it still missed on CI). Windows ignores `wait`.
+40 ms; asked again at once, it still missed on CI). Windows ignores `wait`. `at` is also asked
+where the pointer has rested 100 ms; a click there whose own answer has no role (a button that
+closes its window on release is often gone before the Windows helper reads it) takes that one.
 
 Signal adds (see Signal below):
 

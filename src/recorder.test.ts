@@ -181,6 +181,53 @@ describe("recorder", () => {
     expect(r.events()[0]).toMatchObject({ kind: "click", element: { role: "textarea" } });
   });
 
+  it("a click whose own answer has no role takes the element asked where the pointer rested", async () => {
+    const answers = [
+      { element: { ...field(false), role: "button", name: "Submit" } },
+      { element: { ...field(false), role: "", name: "" } },
+    ];
+    let n = 0;
+    const r = setup({ at: () => answers[n++] ?? null });
+    r.raw({ type: "move", t: 100, x: 50, y: 60 });
+    r.at(150);
+    r.rec.foldTick(); // still 50 ms: not asked yet
+    expect(n).toBe(0);
+    r.at(220);
+    r.rec.foldTick();
+    expect(n).toBe(1);
+    r.raw({ type: "move", t: 230, x: 51, y: 61 }); // within 2 px: the same rest, not asked again
+    r.rec.foldTick();
+    r.click(300);
+    await r.rec.settled();
+    await r.rec.stop();
+    expect(n).toBe(2);
+    const click = r.events().find((e) => e.kind === "click");
+    expect(click).toMatchObject({ element: { role: "button", name: "Submit" } });
+  });
+
+  it("a click with its own element, or away from the rest, does not use the rested one", async () => {
+    const names = ["Rested", "Own", "Elsewhere"];
+    let n = 0;
+    const r = setup({
+      at: () => ({ element: { ...field(false), role: "button", name: names[n++] ?? "" } }),
+    });
+    r.raw({ type: "move", t: 100, x: 50, y: 60 });
+    r.at(250);
+    r.rec.foldTick();
+    r.click(300);
+    r.raw({ type: "move", t: 400, x: 50, y: 60 });
+    r.raw({ type: "move", t: 450, x: 120, y: 60 });
+    r.click(460, 120, 60); // no rest at 120,60: asked once, at the click
+    await r.rec.settled();
+    await r.rec.stop();
+    expect(n).toBe(3);
+    const clicks = r.events().filter((e) => e.kind === "click");
+    expect(clicks.map((c) => (c.kind === "click" ? c.element?.name : null))).toEqual([
+      "Own",
+      "Elsewhere",
+    ]);
+  });
+
   it("a click carries element, app, window, display and before/after frames on disk", async () => {
     const r = setup();
     r.raw({ type: "down", t: 100, x: 50, y: 60, button: "left" });
