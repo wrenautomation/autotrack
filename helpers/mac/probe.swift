@@ -10,7 +10,6 @@ import ApplicationServices
 import IOKit.hid
 import Carbon.HIToolbox
 import ImageIO
-import Darwin.malloc
 import ScreenCaptureKit
 
 setvbuf(stdout, nil, _IOLBF, 0)
@@ -457,7 +456,6 @@ func serve(_ handler: ([String: Any]) -> [String: Any]) {
         guard let data = line.data(using: .utf8),
               let req = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
         let res = autoreleasepool { handler(req) }  // no run loop here: free CG's autoreleased images per request
-        if req["op"] as? String == "grab" { malloc_zone_pressure_relief(nil, 0) }  // hand freed 24 MB buffers back
         if let out = try? JSONSerialization.data(withJSONObject: res), let s = String(data: out, encoding: .utf8) {
             print(s)
             fflush(stdout)

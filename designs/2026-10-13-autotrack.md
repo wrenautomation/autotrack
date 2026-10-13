@@ -22,7 +22,7 @@ nothing from autobrowse; autobrowse keeps a hand-synced copy of the session type
 |---|---|---|
 | hook | `src/hook.ts` | `uiohook-napi` (Mac, Windows): raw mouse and key events |
 | events | `src/events.ts` | raw → `Event`: throttle moves, pair down/up into click/drag, fold keys into text runs and hotkeys |
-| screen | `src/screen.ts` | `node-screenshots`: the display under the cursor, a 2 fps ring of the latest frame (JPEG), "after" frame 300 ms after an act |
+| screen | `src/screen.ts`, `src/capture.ts` | the display under the cursor, a 2 fps ring of the latest grab, "after" frame 300 ms after an act. Grabs live in the shots helper; Node holds slot numbers and hashes |
 | probe | `src/probe.ts` + `helpers/` | app, window, element at a point, focused element is a password: Swift helper on Mac, PowerShell UIA helper on Windows, one JSON-lines protocol |
 | privacy | `src/privacy.ts` | password fields, excluded apps, secret-shaped text, pause |
 | journal | `src/journal.ts` | session dir, 5-minute segments, `events.jsonl` + `frames/`, closed segment → `.done` |
@@ -123,6 +123,36 @@ shipped in the Mac bundle (and built on first run if missing and `swiftc` exists
 P/Invoke for the foreground window. Each answer under 50 ms p95; a timeout gives `null`, never a
 stall in the hook.
 
+## Shots protocol
+
+A second long-lived helper, the same binary or script started with `--shots`, so a capture never
+delays a probe answer. Node keeps slot numbers and hashes, never pixels.
+
+```
+→ {"id":1,"op":"displays"}   ← {"id":1,"displays":[{"id":"1","x":0,"y":0,"width":1512,"height":982,"scale":1.27,"primary":true,"os":{"x":0,"y":0,"width":1512,"height":982,"scale":1}}]}
+→ {"id":2,"op":"grab","display":"1"}   ← {"id":2,"slot":1,"seq":7,"w":1920,"h":1247,"hash":"1e29170f1b8b8773"}
+→ {"id":3,"op":"save","slot":1,"seq":7,"path":"/abs/0.jpg","quality":70}   ← {"id":3,"ok":true,"bytes":371412}
+```
+
+- `displays`: logical points, `scale` = frame pixels per point (what `session.json` `displays[].scale`
+  means). `os` is the OS's own rect and DPI scale, which Node feeds to `coordsFor` (identity on Mac;
+  physical pixels and the DPI scale on Windows, where logical = physical / scale).
+- `grab`: captures the display, downscales to at most 1920 px on the long side, keeps it in a ring of
+  4. `seq` counts grabs; a `save` with a `seq` the ring has since reused answers `ok:false`
+  ("slot reused"), so a stale grab never saves the wrong picture. Node also drops grabs from before a
+  helper restart.
+- `hash`: 16 hex digits. Byte 0 = mean luma of the top half, byte 1 = the bottom half, low 48 bits =
+  a difference hash on a 9x6 grid of cell means. Two frames differ when 3 or more gradient bits flip
+  or either half's luma moves by 2 or more. Mac and Windows compute it the same way.
+- `save`: JPEG to `path.tmp`, then rename. Failure answers `ok:false` with an error; the journal
+  gives the frame number up.
+- Mac: ScreenCaptureKit `SCScreenshotManager.captureImage` on macOS 14+ (GPU downscale: ~2.5 ms CPU
+  and ~55 MB RSS a grab); `CGDisplayCreateImage` below that or when SCK fails (~40 ms CPU, 210-350 MB
+  RSS, which is why it is the fallback, not the default). CoreGraphics draw for the downscale, ImageIO
+  for the encode. Windows: `BitBlt`/`StretchBlt` (HALFTONE, CAPTUREBLT) from the screen DC under
+  per-monitor DPI v2, GDI+ JPEG encoder, all in one embedded C# block.
+- A missing or failing shots helper means no frames; the recorder carries on and `doctor` says so.
+
 ## Storage
 
 - Bucket `autobrowse-prod-track-<acct>` (`deploy/terraform/track.tf`, like `shots.tf`): private,
@@ -219,8 +249,8 @@ y?: number; target?: WebTarget; effects?: WebEffects }`
 
 ## Decision log
 
-- Node + `uiohook-napi` + `node-screenshots` over Rust: same language and redaction rules as
-  autobrowse, both libraries ship prebuilds for darwin-arm64, darwin-x64, win32-x64. The bundle
+- Node + `uiohook-napi` over Rust: same language and redaction rules as autobrowse, the library
+  ships prebuilds for darwin-arm64, darwin-x64, win32-x64. The bundle
   carries its own Node, so the laptop needs nothing installed.
 - A GitHub Release bundle over npm: one download, no npm on the laptop, no first-publish dance for a
   new package; the repo is public anyway.
@@ -240,3 +270,6 @@ y?: number; target?: WebTarget; effects?: WebEffects }`
   capture, copy, downscale and JS encode cost ~110 ms CPU a frame, 20–27% of a core while active,
   220–360 MB RSS. A second helper process (`--shots`) grabs into a ring and writes JPEG with the
   OS's own encoder (ImageIO on Mac, GDI+ on Windows); Node only names the files.
+- Mac captures with ScreenCaptureKit first, not `CGDisplayCreateImage` (measured 2026-10-13): CG
+  cost ~40 ms CPU and left the helper at 210-350 MB RSS; SCK scales on the GPU and costs ~2.5 ms CPU
+  and ~55 MB. CG stays as the fallback (macOS 12 and 13, or SCK failing).
