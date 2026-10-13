@@ -129,7 +129,12 @@ try {
     if (-not (Test-Path $extManifest)) { Die "no unpacked extension at $extManifest" }
     if (-not (Select-String -Path $extManifest -Pattern '"key"' -Quiet)) { Die 'unpacked manifest.json has no key (the extension id would change)' }
     $acl = (Get-Acl (Join-Path $data 'config.json')).Access
-    if ($acl.Count -ne 1) { Die "config.json is readable by $($acl.Count) principals: $($acl | ForEach-Object IdentityReference)" }
+    if ($acl.Count -ne 1) {
+        $cfgPath = Join-Path $data 'config.json'
+        Write-Host "icacls: $((& icacls $cfgPath) -join ' | ')"
+        Write-Host "protected: $((Get-Acl $cfgPath).AreAccessRulesProtected); written $((Get-Item $cfgPath).LastWriteTime.ToString('HH:mm:ss.fff')), now $((Get-Date).ToString('HH:mm:ss.fff'))"
+        Die "config.json is readable by $($acl.Count) principals: $($acl | ForEach-Object IdentityReference)"
+    }
     if (-not (Running)) { Die 'recorder not running after install' }
     Native { & $cli status }
 
