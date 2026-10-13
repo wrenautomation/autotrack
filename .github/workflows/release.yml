@@ -66,3 +66,46 @@ jobs:
         run: >
           gh release create "$GITHUB_REF_NAME" out/*
           --repo "$GITHUB_REPOSITORY" --title "autotrack $GITHUB_REF_NAME" --generate-notes
+
+  # What a person runs, against the release just published: the one-line install from main, then
+  # doctor and uninstall. A shape-valid code with a fake key; nothing ships, nothing starts at login.
+  smoke:
+    needs: publish
+    name: install from the release, ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      AUTOTRACK_NO_AUTOSTART: "1"
+      AUTOTRACK_NO_BROWSER: "1"
+    steps:
+      - name: install code
+        shell: bash
+        run: |
+          code=$(node -e 'console.log(Buffer.from(JSON.stringify({v:1,bucket:"autotrack-smoke",region:"us-east-1",device:"smoke",keyId:"AKIASMOKETESTKEY0001",secret:"smoke-secret-not-a-real-key"})).toString("base64url"))')
+          echo "AUTOTRACK=$code" >> "$GITHUB_ENV"
+      - name: install, doctor, uninstall (mac)
+        if: runner.os == 'macOS'
+        run: |
+          sh -c "$(curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/install/install.sh)"
+          cli="$HOME/Library/Application Support/autotrack/app/bin/autotrack"
+          "$cli" doctor || true
+          test -f "$HOME/Library/Application Support/autotrack/app/VERSION"
+          grep -q "^${GITHUB_REF_NAME#v}+" "$HOME/Library/Application Support/autotrack/app/VERSION"
+          "$cli" uninstall --yes
+          test ! -e "$HOME/Library/Application Support/autotrack/app"
+      - name: install, doctor, uninstall (windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          irm "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$env:GITHUB_SHA/install/install.ps1" | iex
+          $app = Join-Path $env:LOCALAPPDATA 'autotrack\app'
+          & "$app\autotrack.cmd" doctor
+          $v = (Get-Content "$app\VERSION" -Raw).Trim()
+          if (-not $v.StartsWith($env:GITHUB_REF_NAME.TrimStart('v') + '+')) { throw "installed $v, expected $env:GITHUB_REF_NAME" }
+          & "$app\autotrack.cmd" uninstall --yes
+          if ($LASTEXITCODE -ne 0) { throw "uninstall exited $LASTEXITCODE" }
+          if (Test-Path $app) { throw "uninstall left $app" }
