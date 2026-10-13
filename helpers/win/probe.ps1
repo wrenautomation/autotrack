@@ -9,6 +9,8 @@
 # awareness. This process makes itself per-monitor DPI aware (v2) first, so UIA and window rects are
 # physical too. No scaling happens here; the recorder converts to logical points with displays[].scale.
 #
+# Elements carry path (ancestors up to the window), id (AutomationId), cls (ClassName), help; each
+# omitted when empty. Chromium turns its UIA tree on by itself when a UIA client asks (see README).
 # Never returns an element's value. Per-request errors answer null; the loop never dies.
 # UIA has no per-call timeout, so a hung app can stall one request; the caller times out to null.
 
@@ -90,15 +92,51 @@ function ConvertTo-Rounded([double]$v) {
     return [int][math]::Round($v)
 }
 
-function Get-ElementJson($el) {
-    if ($null -eq $el) { return $null }
-    $c = $el.Current
+# One cross-process call per element: every property we read is fetched into the cache together.
+$script:cache = New-Object System.Windows.Automation.CacheRequest
+foreach ($prop in @(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.AutomationElement]::BoundingRectangleProperty,
+        [System.Windows.Automation.AutomationElement]::IsPasswordProperty,
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+        [System.Windows.Automation.AutomationElement]::ClassNameProperty,
+        [System.Windows.Automation.AutomationElement]::HelpTextProperty)) { $script:cache.Add($prop) }
+$script:walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+$script:windowTypeId = [System.Windows.Automation.ControlType]::Window.Id
+$maxAncestors = 6
+$walkBudgetMs = 30   # ancestor walking stops past this so a slow app can't blow the 50 ms answer
+
+function Get-RoleName($controlType) {
+    return ($controlType.ProgrammaticName -replace '^ControlType\.', '').ToLowerInvariant()
+}
+
+# Ancestors nearest first, stopping before the top-level window (that is `front.window`).
+function Get-Path($el, $clock) {
+    $path = New-Object System.Collections.ArrayList
+    $cur = $el
+    while ($path.Count -lt $maxAncestors -and $clock.ElapsedMilliseconds -lt $walkBudgetMs) {
+        $parent = $script:walker.GetParent($cur, $script:cache)
+        if ($null -eq $parent) { break }
+        $c = $parent.Cached
+        if ($c.ControlType.Id -eq $script:windowTypeId) { break }
+        if ([System.Windows.Automation.Automation]::Compare($parent, [System.Windows.Automation.AutomationElement]::RootElement)) { break }
+        [void]$path.Add([ordered]@{ role = (Get-RoleName $c.ControlType); name = [string]$c.Name })
+        $cur = $parent
+    }
+    return , $path.ToArray()
+}
+
+function Get-ElementJson($raw) {
+    if ($null -eq $raw) { return $null }
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $el = $raw.GetUpdatedCache($script:cache)
+    $c = $el.Cached
     $b = $c.BoundingRectangle
-    $role = $c.ControlType.ProgrammaticName -replace '^ControlType\.', ''
     $name = $c.Name
     if ($null -eq $name) { $name = '' }
-    return [ordered]@{
-        role   = $role.ToLowerInvariant()
+    $out = [ordered]@{
+        role   = (Get-RoleName $c.ControlType)
         name   = [string]$name
         x      = ConvertTo-Rounded $b.X
         y      = ConvertTo-Rounded $b.Y
@@ -106,6 +144,13 @@ function Get-ElementJson($el) {
         height = ConvertTo-Rounded $b.Height
         secure = [bool]$c.IsPassword
     }
+    $path = Get-Path $el $clock
+    if ($path.Count -gt 0) { $out['path'] = $path }
+    # Each omitted when empty. No Mac-style url on Windows (UIA has no link target property).
+    if ($c.AutomationId) { $out['id'] = [string]$c.AutomationId }
+    if ($c.ClassName) { $out['cls'] = [string]$c.ClassName }
+    if ($c.HelpText) { $out['help'] = [string]$c.HelpText }
+    return $out
 }
 
 function Get-FrontJson {

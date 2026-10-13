@@ -1,6 +1,8 @@
 // wren-track probe (Mac): long-lived helper. One JSON request per line on stdin, one answer per
 // line on stdout. Ops: at, front, focused, perm. See designs/2026-10-13-track.md "Probe protocol".
 // Never returns an element's value. Coordinates: global points, origin top-left (same as uiohook).
+// Elements also carry path (ancestors up to the window), id, cls, url, help; each omitted when empty.
+// Chromium and Electron apps get AXManualAccessibility once per pid so web content shows its tree.
 import AppKit
 import ApplicationServices
 import IOKit.hid
@@ -18,7 +20,13 @@ AXUIElementSetMessagingTimeout(systemWide, axTimeout)
 let elementAttrs: [String] = [
     kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute,
     "AXLabel", kAXPositionAttribute, kAXSizeAttribute,
+    "AXIdentifier", "AXDOMIdentifier", "AXDOMClassList", "AXURL", kAXHelpAttribute, kAXParentAttribute,
 ]
+let ancestorAttrs: [String] = [
+    kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel", kAXParentAttribute,
+]
+let maxAncestors = 6
+let walkBudgetMs = 30.0  // ancestor walking stops past this, so a slow app can't blow the 50 ms answer
 let windowAttrs: [String] = [kAXTitleAttribute, kAXPositionAttribute, kAXSizeAttribute]
 
 func attrs(_ el: AXUIElement, _ names: [String]) -> [String: CFTypeRef]? {
@@ -49,26 +57,103 @@ func size(_ v: CFTypeRef?) -> CGSize? {
 
 func r(_ d: CGFloat) -> Int { Int(d.rounded()) }
 
+// Chromium and Electron build their web accessibility tree only when asked. AXManualAccessibility
+// asks without side effects; AXEnhancedUserInterface is the fallback. Once per pid.
+var enabledPids = Set<pid_t>()
+let chromiumIds = ["com.google.Chrome", "com.microsoft.edgemac", "com.brave.Browser", "com.operasoftware.",
+                   "company.thebrowser.Browser", "com.vivaldi."]
+let noEnhance = ProcessInfo.processInfo.environment["WREN_PROBE_NO_ENHANCE"] != nil  // for before/after measuring
+
+func isChromiumBased(_ app: NSRunningApplication) -> Bool {
+    if let id = app.bundleIdentifier, chromiumIds.contains(where: { id.hasPrefix($0) }) { return true }
+    guard let url = app.bundleURL else { return false }
+    let fw = url.appendingPathComponent("Contents/Frameworks")
+    let fm = FileManager.default
+    return fm.fileExists(atPath: fw.appendingPathComponent("Electron Framework.framework").path)
+        || fm.fileExists(atPath: fw.appendingPathComponent("Chromium Embedded Framework.framework").path)
+}
+
+func enableWebAccessibility(_ pid: pid_t) {
+    if noEnhance || enabledPids.contains(pid) { return }
+    enabledPids.insert(pid)
+    guard let app = NSRunningApplication(processIdentifier: pid), isChromiumBased(app) else { return }
+    let ax = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(ax, 0.25)  // one-off, may take a moment while the tree builds
+    if AXUIElementSetAttributeValue(ax, "AXManualAccessibility" as CFString, kCFBooleanTrue) != .success {
+        _ = AXUIElementSetAttributeValue(ax, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    }
+}
+
+func normRole(_ role: String) -> String {
+    (role.hasPrefix("AX") ? String(role.dropFirst(2)) : role).lowercased()
+}
+
+func firstNonEmpty(_ a: [String: CFTypeRef], _ keys: [String]) -> String {
+    for k in keys { let v = str(a[k]); if !v.isEmpty { return v } }
+    return ""
+}
+
+func urlString(_ v: CFTypeRef?) -> String {
+    guard let v = v else { return "" }
+    if CFGetTypeID(v) == CFURLGetTypeID() { return (CFURLGetString((v as! CFURL)) as String?) ?? "" }
+    return str(v)
+}
+
+func classList(_ v: CFTypeRef?) -> String {
+    guard let v = v else { return "" }
+    if CFGetTypeID(v) == CFArrayGetTypeID() { return ((v as! [Any]).compactMap { $0 as? String }).joined(separator: " ") }
+    return str(v)
+}
+
+func axElement(_ v: CFTypeRef?) -> AXUIElement? {
+    guard let v = v, CFGetTypeID(v) == AXUIElementGetTypeID() else { return nil }
+    return (v as! AXUIElement)
+}
+
+func msSince(_ t0: DispatchTime) -> Double { Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6 }
+
+// Ancestors nearest first, stopping before the window (the window is `front.window`).
+func ancestors(from parent: AXUIElement?, _ t0: DispatchTime) -> [[String: Any]] {
+    var out: [[String: Any]] = []
+    var cur = parent
+    while let el = cur, out.count < maxAncestors, msSince(t0) < walkBudgetMs {
+        AXUIElementSetMessagingTimeout(el, axTimeout)
+        guard let a = attrs(el, ancestorAttrs) else { break }
+        let role = str(a[kAXRoleAttribute])
+        if role.isEmpty || role == "AXWindow" || role == "AXApplication" || role == "AXSheet" { break }
+        out.append(["role": normRole(role), "name": firstNonEmpty(a, [kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel"])])
+        cur = axElement(a[kAXParentAttribute])
+    }
+    return out
+}
+
 func elementJSON(_ el: AXUIElement) -> Any {
+    let t0 = DispatchTime.now()
     AXUIElementSetMessagingTimeout(el, axTimeout)
+    var pid: pid_t = 0
+    if AXUIElementGetPid(el, &pid) == .success { enableWebAccessibility(pid) }
     guard let a = attrs(el, elementAttrs) else { return NSNull() }
     let role = str(a[kAXRoleAttribute])
     if role.isEmpty { return NSNull() }
     let sub = str(a[kAXSubroleAttribute])
-    var name = ""
-    for k in [kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel"] {
-        name = str(a[k])
-        if !name.isEmpty { break }
-    }
     let p = point(a[kAXPositionAttribute]) ?? .zero
     let s = size(a[kAXSizeAttribute]) ?? .zero
     let secure = sub == "AXSecureTextField" || IsSecureEventInputEnabled()
-    return [
-        "role": role.hasPrefix("AX") ? String(role.dropFirst(2)).lowercased() : role.lowercased(),
-        "name": name,
+    var out: [String: Any] = [
+        "role": normRole(role),
+        "name": firstNonEmpty(a, [kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel"]),
         "x": r(p.x), "y": r(p.y), "width": r(s.width), "height": r(s.height),
         "secure": secure,
-    ] as [String: Any]
+    ]
+    let path = ancestors(from: axElement(a[kAXParentAttribute]), t0)
+    if !path.isEmpty { out["path"] = path }
+    for (key, value) in [
+        "id": firstNonEmpty(a, ["AXIdentifier", "AXDOMIdentifier"]),
+        "cls": classList(a["AXDOMClassList"]),
+        "url": urlString(a["AXURL"]),
+        "help": str(a[kAXHelpAttribute]),
+    ] where !value.isEmpty { out[key] = value }
+    return out
 }
 
 func opAt(_ x: Double, _ y: Double) -> Any {
@@ -98,6 +183,7 @@ func opFront() -> [String: Any] {
         app = NSWorkspace.shared.frontmostApplication
     }
     guard let app = app else { return ["app": NSNull(), "window": NSNull()] }
+    enableWebAccessibility(app.processIdentifier)
     let appJSON: [String: Any] = [
         "name": app.localizedName ?? "",
         "id": app.bundleIdentifier ?? "",

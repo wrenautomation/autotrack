@@ -60,6 +60,19 @@ function Test-Element($e, [string]$what) {
     Check ($e.secure -is [bool]) "$what secure is not a bool"
     foreach ($k in 'x', 'y', 'width', 'height') { Check ($null -ne $e.$k -and $e.$k -is [ValueType]) "$what $k is not a number" }
     Check ($null -eq $e.PSObject.Properties['value']) "$what carries a value"
+    $allowed = 'role', 'name', 'x', 'y', 'width', 'height', 'secure', 'path', 'id', 'cls', 'url', 'help'
+    foreach ($prop in $e.PSObject.Properties) { Check ($allowed -contains $prop.Name) "$what has unexpected field '$($prop.Name)'" }
+    foreach ($k in 'id', 'cls', 'url', 'help') {
+        if ($null -ne $e.PSObject.Properties[$k]) { Check ($e.$k -is [string] -and $e.$k.Length -gt 0) "$what $k is present but empty or not a string" }
+    }
+    if ($null -ne $e.PSObject.Properties['path']) {
+        $steps = @($e.path)
+        Check ($steps.Count -ge 1 -and $steps.Count -le 6) "$what path has $($steps.Count) entries"
+        foreach ($a in $steps) {
+            Check ($a.role -is [string] -and $a.name -is [string]) "$what path entry lacks role/name"
+            Check ($a.role -ne 'window') "$what path runs past the top-level window"
+        }
+    }
 }
 
 function Find-Notepad {
@@ -135,6 +148,7 @@ try {
         if ($at.element) {
             Check ($at.element.role -match '^(edit|document)$') "at role is '$($at.element.role)', expected edit or document"
             Check ($at.element.secure -eq $false) 'at: Notepad edit control reported secure'
+            Check ($at.element.cls -is [string] -and $at.element.cls.Length -gt 0) 'at: Notepad edit control has no cls (UIA ClassName)'
             $e = $at.element
             Check ($cx -ge $e.x -and $cx -le ($e.x + $e.width) -and $cy -ge $e.y -and $cy -le ($e.y + $e.height)) "at($cx,$cy) bounds ($($e.x),$($e.y),$($e.width),$($e.height)) do not contain the point"
         }
