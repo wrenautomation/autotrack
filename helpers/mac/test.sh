@@ -1,5 +1,6 @@
 #!/bin/sh
-# Builds the Mac probe, then runs test.mjs (each op's JSON shape, `at` latency over 50 requests) and
+# Builds the Mac probe, then runs test.mjs (each op's JSON shape, `at` latency over 50 requests, no
+# name that shows a typed value) and
 # test-shots.mjs (`--shots`: displays, grab, save, ring, grab/save timing; needs Screen Recording).
 set -eu
 cd "$(dirname "$0")"

@@ -95,7 +95,8 @@ try {
     Check ($null -eq $na.element) 'at without coordinates is not null'
 
     # the test's own text box window, in a process of its own (UIA into this process would wait on itself)
-    $testForm = Start-Process powershell.exe -PassThru -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'test-form.ps1')
+    $secret = 'zq-secret-4417'
+    $testForm = Start-Process powershell.exe -PassThru -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'test-form.ps1'), $secret
     $win = $null
     for ($i = 0; $i -lt 60 -and $null -eq $win; $i++) { Start-Sleep -Milliseconds 500; $win = Find-TestForm }
     if ($null -eq $win) { throw 'test form window did not appear within 30 s' }
@@ -120,32 +121,43 @@ try {
         Check ($front.window.width -gt 0 -and $front.window.height -gt 0) 'front window has no size'
     }
 
-    # type something, then focused + at on the edit control
-    $secret = 'zq-secret-4417'
+    # type something, then focused + at on the text box (a multiline box is a UIA Document)
     [System.Windows.Forms.SendKeys]::SendWait($secret)
     Start-Sleep -Milliseconds 300
     $foc = Ask @{ op = 'focused' }
     Test-Element $foc.element 'focused element'
     if ($foc.element) {
-        Check ($foc.element.role -eq 'edit') "focused role is '$($foc.element.role)', expected edit"
+        Check ($foc.element.role -match '^(edit|document)$') "focused role is '$($foc.element.role)', expected edit or document"
         Check ($foc.element.secure -eq $false) 'the text box reported secure'
     }
 
-    $cond = New-Object System.Windows.Automation.PropertyCondition ($UIA::ControlTypeProperty), ([System.Windows.Automation.ControlType]::Edit)
+    $cond = New-Object System.Windows.Automation.PropertyCondition ($UIA::AutomationIdProperty), 'notes'
     $edit = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    if ($null -eq $edit) { Fail 'no Edit control found in the test form' }
+    if ($null -eq $edit) { Fail 'no notes box found in the test form' }
     else {
         $r = $edit.Current.BoundingRectangle
         $cx = [int]($r.X + $r.Width / 2); $cy = [int]($r.Y + $r.Height / 2)
         $at = Ask @{ op = 'at'; x = $cx; y = $cy }
         Test-Element $at.element "at($cx,$cy)"
         if ($at.element) {
-            Check ($at.element.role -eq 'edit') "at role is '$($at.element.role)', expected edit"
+            Check ($at.element.role -match '^(edit|document)$') "at role is '$($at.element.role)', expected edit or document"
             Check ($at.element.secure -eq $false) 'at: the text box reported secure'
             Check ($at.element.cls -is [string] -and $at.element.cls.Length -gt 0) 'at: the text box has no cls (UIA ClassName)'
             $e = $at.element
             Check ($cx -ge $e.x -and $cx -le ($e.x + $e.width) -and $cy -ge $e.y -and $cy -le ($e.y + $e.height)) "at($cx,$cy) bounds ($($e.x),$($e.y),$($e.width),$($e.height)) do not contain the point"
         }
+    }
+
+    # a box whose accessible name is its own text: the name must not come back
+    $cond = New-Object System.Windows.Automation.PropertyCondition ($UIA::AutomationIdProperty), 'titled'
+    $titled = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+    if ($null -eq $titled) { Fail 'no titled box found in the test form' }
+    else {
+        $r = $titled.Current.BoundingRectangle
+        $tx = [int]($r.X + $r.Width / 2); $ty = [int]($r.Y + $r.Height / 2)
+        $ta = Ask @{ op = 'at'; x = $tx; y = $ty }
+        Test-Element $ta.element "at($tx,$ty) on the titled box"
+        if ($ta.element) { Check ($ta.element.name -eq '') "the titled box's name is '$($ta.element.name)', expected ''" }
     }
 
     # a point far outside every monitor answers null, not an error

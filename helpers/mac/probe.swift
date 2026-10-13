@@ -2,7 +2,8 @@
 // line on stdout. Ops: at, front, focused, perm. See designs/2026-10-13-autotrack.md "Probe protocol".
 // `probe --shots` is the same binary as a second process that only takes screen frames (ops grab,
 // save, displays; see "Shots protocol"), so a capture never delays a probe answer.
-// Never returns an element's value. Coordinates: global points, origin top-left (same as uiohook).
+// Never returns an element's value, nor a name that shows it (a text field named by its content).
+// Coordinates: global points, origin top-left (same as uiohook).
 // Elements also carry path (ancestors up to the window), id, cls, url, help; each omitted when empty.
 // Chromium and Electron apps get AXManualAccessibility once per pid so web content shows its tree.
 import AppKit
@@ -125,10 +126,45 @@ func ancestors(from parent: AXUIElement?, _ t0: DispatchTime) -> [[String: Any]]
         guard let a = attrs(el, ancestorAttrs) else { break }
         let role = str(a[kAXRoleAttribute])
         if role.isEmpty || role == "AXWindow" || role == "AXApplication" || role == "AXSheet" { break }
-        out.append(["role": normRole(role), "name": firstNonEmpty(a, [kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel"])])
+        let name = firstNonEmpty(a, [kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel"])
+        out.append(["role": normRole(role), "name": safeName(el, role: role, name)])
         cur = axElement(a[kAXParentAttribute])
     }
     return out
+}
+
+// Text-entry roles: AXTitle/AXDescription can carry what was typed (web inputs, some editors).
+let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox"]
+
+/// The element's value, its first 4,096 characters at most, only to compare names against. Never sent.
+func valuePrefix(_ el: AXUIElement) -> String {
+    var count: CFTypeRef?
+    if AXUIElementCopyAttributeValue(el, kAXNumberOfCharactersAttribute as CFString, &count) == .success,
+       let n = (count as? NSNumber)?.intValue, n > 4096 {
+        var range = CFRange(location: 0, length: 4096)
+        var out: CFTypeRef?
+        guard let r = AXValueCreate(.cfRange, &range),
+              AXUIElementCopyParameterizedAttributeValue(el, kAXStringForRangeParameterizedAttribute as CFString, r, &out) == .success
+        else { return "" }
+        return str(out)
+    }
+    var v: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &v) == .success else { return "" }
+    return str(v)
+}
+
+/// A name that is (or holds) the element's value is no name: it would leak what was typed.
+func nameShowsValue(_ name: String, _ value: String) -> Bool {
+    let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    let v = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if n.isEmpty || v.isEmpty { return false }
+    return n == v || (v.count >= 3 && n.contains(v)) || (n.count >= 12 && v.contains(n))
+}
+
+/// The element's name, empty when a text-entry element's name shows its value.
+func safeName(_ el: AXUIElement, role: String, _ name: String) -> String {
+    if name.isEmpty || !textRoles.contains(role) { return name }
+    return nameShowsValue(name, valuePrefix(el)) ? "" : name
 }
 
 func elementJSON(_ el: AXUIElement) -> Any {
@@ -145,7 +181,7 @@ func elementJSON(_ el: AXUIElement) -> Any {
     let secure = sub == "AXSecureTextField" || IsSecureEventInputEnabled()
     var out: [String: Any] = [
         "role": normRole(role),
-        "name": firstNonEmpty(a, [kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel"]),
+        "name": safeName(el, role: role, firstNonEmpty(a, [kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel"])),
         "x": r(p.x), "y": r(p.y), "width": r(s.width), "height": r(s.height),
         "secure": secure,
     ]

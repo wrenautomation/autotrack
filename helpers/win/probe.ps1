@@ -11,7 +11,8 @@
 #
 # Elements carry path (ancestors up to the window), id (AutomationId), cls (ClassName), help; each
 # omitted when empty. Chromium turns its UIA tree on by itself when a UIA client asks (see README).
-# Never returns an element's value. Per-request errors answer null; the loop never dies.
+# Never returns an element's value, nor a name that shows it (UIA often names a text box by its
+# text). Per-request errors answer null; the loop never dies.
 # UIA has no per-call timeout, so a hung app can stall one request; the caller times out to null.
 #
 # `--shots` starts the other long-lived helper instead: frames. Ops: displays, grab, save. See designs/
@@ -492,7 +493,8 @@ foreach ($prop in @(
         [System.Windows.Automation.AutomationElement]::IsPasswordProperty,
         [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
         [System.Windows.Automation.AutomationElement]::ClassNameProperty,
-        [System.Windows.Automation.AutomationElement]::HelpTextProperty)) { $script:cache.Add($prop) }
+        [System.Windows.Automation.AutomationElement]::HelpTextProperty,
+        [System.Windows.Automation.AutomationElement]::LabeledByProperty)) { $script:cache.Add($prop) }
 $script:walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 $script:windowTypeId = [System.Windows.Automation.ControlType]::Window.Id
 $maxAncestors = 6
@@ -500,6 +502,45 @@ $walkBudgetMs = 30   # ancestor walking stops past this so a slow app can't blow
 
 function Get-RoleName($controlType) {
     return ($controlType.ProgrammaticName -replace '^ControlType\.', '').ToLowerInvariant()
+}
+
+# UIA's Name is often the content itself: a Document or Edit named by its text, a combo box or
+# list item named by its value. A Document takes its name only from its label (LabeledBy); an Edit
+# or value role loses a name that shows its value (an Edit then falls back to its label). Values
+# are read only to compare, never sent.
+$script:valueRoles = @('edit', 'combobox', 'spinner', 'listitem', 'dataitem', 'treeitem', 'custom')
+$script:valueProp = [System.Windows.Automation.ValuePattern]::ValueProperty
+
+function Test-ShowsValue([string]$name, [string]$value) {
+    $n = $name.Trim(); $v = $value.Trim()
+    if ($n.Length -eq 0 -or $v.Length -eq 0) { return $false }
+    return ($n -eq $v) -or ($v.Length -ge 3 -and $n.Contains($v)) -or ($n.Length -ge 12 -and $v.Contains($n))
+}
+
+function Get-ValueText($el) {
+    try {
+        $v = $el.GetCurrentPropertyValue($script:valueProp, $true)
+        if ($v -is [string]) { return $v }
+    } catch { }
+    return ''
+}
+
+function Get-LabelName($c) {
+    try { $lb = $c.LabeledBy; if ($null -ne $lb) { return [string]$lb.Current.Name } } catch { }
+    return ''
+}
+
+# $c: the element's Cached properties.
+function Get-SafeName($el, $c, [string]$role) {
+    if ($role -eq 'document') { return (Get-LabelName $c) }
+    $name = [string]$c.Name
+    if ($name.Length -eq 0 -or $script:valueRoles -notcontains $role) { return $name }
+    $value = Get-ValueText $el
+    if (-not (Test-ShowsValue $name $value)) { return $name }
+    if ($role -ne 'edit') { return '' }
+    $label = Get-LabelName $c
+    if (Test-ShowsValue $label $value) { return '' }
+    return $label
 }
 
 # Ancestors nearest first, stopping before the top-level window (that is `front.window`).
@@ -512,7 +553,8 @@ function Get-Path($el, $clock) {
         $c = $parent.Cached
         if ($c.ControlType.Id -eq $script:windowTypeId) { break }
         if ([System.Windows.Automation.Automation]::Compare($parent, [System.Windows.Automation.AutomationElement]::RootElement)) { break }
-        [void]$path.Add([ordered]@{ role = (Get-RoleName $c.ControlType); name = [string]$c.Name })
+        $role = Get-RoleName $c.ControlType
+        [void]$path.Add([ordered]@{ role = $role; name = (Get-SafeName $parent $c $role) })
         $cur = $parent
     }
     return , $path.ToArray()
@@ -524,11 +566,10 @@ function Get-ElementJson($raw) {
     $el = $raw.GetUpdatedCache($script:cache)
     $c = $el.Cached
     $b = $c.BoundingRectangle
-    $name = $c.Name
-    if ($null -eq $name) { $name = '' }
+    $role = Get-RoleName $c.ControlType
     $out = [ordered]@{
-        role   = (Get-RoleName $c.ControlType)
-        name   = [string]$name
+        role   = $role
+        name   = (Get-SafeName $el $c $role)
         x      = ConvertTo-Rounded $b.X
         y      = ConvertTo-Rounded $b.Y
         width  = ConvertTo-Rounded $b.Width

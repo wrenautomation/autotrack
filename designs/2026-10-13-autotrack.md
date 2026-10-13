@@ -92,6 +92,10 @@ same as a 1080p one.
 - **Idle reading**: while nobody types or clicks but the screen changes (scrolling a page, video),
   one `frame` event every 2 s at most when the frame differs from the last written one (cheap hash
   on a downsampled copy).
+- **Names never show a value.** UIA often names a text box by its text, and AX titles can carry
+  what was typed. A Document takes its name only from its label (UIA `LabeledBy`); an edit, combo
+  box, list item or AX text field drops a name that equals or contains its value (or that its value
+  contains, from 12 characters). The helpers read the value only to compare.
 - **Password fields never log keys.** The probe answers `secure` for the focused element
   (Mac: `AXSecureTextField` subrole or `IsSecureEventInputEnabled()`; Windows: UIA `IsPassword`).
   Typing into one writes `{kind:"text", text:"", redacted:true}`. When the probe can't answer in

@@ -1,5 +1,6 @@
-# Probe test window (test.ps1 only): a WinForms window titled "autotrack probe test" with one
-# multiline text box filling it. A window the test makes itself, so its UIA tree is the same on
+# Probe test window (test.ps1 only): a WinForms window titled "autotrack probe test" with a
+# multiline text box (UIA Document, focused) and a one-line box holding $args[0] whose accessible
+# name is that same text (the probe must not send it as the name). A window the test makes itself, so its UIA tree is the same on
 # every Windows (Notepad's differs between the classic and the Windows 11 one). Closes after 120 s.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File test-form.ps1
@@ -25,11 +26,19 @@ $form.StartPosition = 'Manual'
 $form.Location = New-Object System.Drawing.Point(80, 80)
 $form.ClientSize = New-Object System.Drawing.Size(640, 400)
 
+$typed = if ($args.Count -gt 0) { [string]$args[0] } else { 'typed text' }
 $box = New-Object System.Windows.Forms.TextBox
 $box.Name = 'notes'
 $box.Multiline = $true
-$box.Dock = 'Fill'
-$form.Controls.Add($box)
+$box.Location = New-Object System.Drawing.Point(10, 10)
+$box.Size = New-Object System.Drawing.Size(620, 330)
+$titled = New-Object System.Windows.Forms.TextBox
+$titled.Name = 'titled'
+$titled.Text = $typed
+$titled.AccessibleName = $typed
+$titled.Location = New-Object System.Drawing.Point(10, 356)
+$titled.Size = New-Object System.Drawing.Size(620, 26)
+$form.Controls.AddRange(@($box, $titled))
 $form.Add_Shown({ $form.Activate(); $box.Focus() })
 
 $timer = New-Object System.Windows.Forms.Timer

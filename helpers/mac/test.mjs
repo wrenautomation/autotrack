@@ -121,6 +121,45 @@ if (!perm.accessibility)
 else check(hits > 0, "no `at` hit anywhere with Accessibility granted");
 check(Number(p(0.95)) < 50, `p95 ${p(0.95)} ms is not under 50 ms`);
 
+// Names that show a typed value (fixtures/value-fields.swift): a text field named by its content
+// is named "", one named "Email" keeps it, and the typed text comes back in no answer.
+{
+  const { execFileSync } = await import("node:child_process");
+  const { existsSync, mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "probe-fields-"));
+  const bin = join(dir, "value-fields");
+  const out = join(dir, "fields.json");
+  execFileSync("swiftc", [
+    "-O",
+    "-o",
+    bin,
+    join(dirname(fileURLToPath(import.meta.url)), "fixtures/value-fields.swift"),
+  ]);
+  const app = spawn(bin, [out], { stdio: "ignore" });
+  for (let i = 0; i < 150 && !existsSync(out); i++) await new Promise((r) => setTimeout(r, 100));
+  if (!existsSync(out)) failures.push("value-fields fixture did not come up");
+  else {
+    const f = JSON.parse(readFileSync(out, "utf8"));
+    const answers = [];
+    for (const c of f.fields)
+      answers.push(await ask({ op: "at", x: Math.round(c.x), y: Math.round(c.y) }));
+    answers.push(await ask({ op: "focused" }));
+    console.log("value fields", JSON.stringify(answers.map((a) => a.element)));
+    check(!JSON.stringify(answers).includes(f.typed), "a typed value came back in an answer");
+    if (perm.accessibility) {
+      const [titled, labelled, email] = answers.map((a) => a.element);
+      check(titled?.role === "textfield" && titled.name === "", "a field titled by its value has name \"\"");
+      check(labelled?.role === "textfield" && labelled.name === "", "a field labelled with its value has name \"\"");
+      check(email?.role === "textfield" && email.name === "Email", "a field titled Email keeps its name");
+    }
+  }
+  const exited = new Promise((res) => app.on("exit", res));
+  app.kill();
+  await exited;
+  rmSync(dir, { recursive: true, force: true });
+}
+
 // Optional: AUTOTRACK_TEST_CHROME=1 opens an isolated Chrome on fixtures/web-button.html and waits for the
 // probe to see the page's button (role, name, id, ancestors) - proves AXManualAccessibility works.
 if (process.env.AUTOTRACK_TEST_CHROME) {
