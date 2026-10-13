@@ -1,0 +1,5 @@
+# Probe helpers
+
+Small native child processes that `src/probe.ts` talks to over stdin and stdout, one JSON line each way. They answer: what app and window is in front, what UI element is at a point or has focus (role, name, bounds, never its value), is it a password field, and are the OS permissions granted. `mac/probe.swift` uses the Accessibility API; `win/probe.ps1` (Windows PowerShell 5.1) uses UI Automation. The protocol is in `designs/2026-10-13-track.md`. The Windows helper works in physical pixels, which is what uiohook reports there.
+
+Mac: `mac/build.sh` builds the universal `mac/probe` (needs `swiftc`); `mac/test.sh` builds it, checks each op's shape and prints `at` latency over 50 requests. The test needs Accessibility granted to the terminal you run it from, or `at` and `focused` return null and it says so. Windows: `powershell -NoProfile -ExecutionPolicy Bypass -File win\test.ps1` starts the helper, opens Notepad, and checks `at`, `focused` and `front`; it exits non-zero and prints what failed.
