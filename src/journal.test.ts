@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -76,14 +76,50 @@ describe("journal", () => {
     j.close();
   });
 
-  it("numbers frames across the session, in the segment they were written in", () => {
+  it("numbers frames across the session, in the segment they were reserved in", () => {
     const j = new Journal({ sessions: tmp(), meta, now: () => T0, segmentEvents: 1 });
-    expect(j.writeFrame(new Uint8Array([1]))).toBe(0);
+    const a = j.reserveFrame();
+    expect(a.n).toBe(0);
+    writeFileSync(a.path, "a");
+    a.done(true);
     j.write(ev(0));
     j.write(ev(1)); // rotates
-    expect(j.writeFrame(new Uint8Array([2]))).toBe(1);
+    const b = j.reserveFrame();
+    expect(b.n).toBe(1);
+    writeFileSync(b.path, "b");
+    b.done(true);
     expect(readdirSync(join(j.dir, "000", "frames"))).toEqual(["0.jpg"]);
     expect(readdirSync(join(j.dir, "001", "frames"))).toEqual(["1.jpg"]);
+    expect(j.frames).toBe(2);
+    j.close();
+  });
+
+  it("a segment with a save in flight is not closed; it rotates once the save is done", () => {
+    const j = new Journal({ sessions: tmp(), meta, now: () => T0, segmentEvents: 1 });
+    j.write(ev(0));
+    const f = j.reserveFrame();
+    j.write(ev(1)); // due to rotate, but a save is in flight
+    expect(j.segment).toBe("000");
+    expect(existsSync(join(j.dir, "000", ".done"))).toBe(false);
+    writeFileSync(f.path, "x");
+    f.done(true);
+    j.write(ev(2));
+    expect(j.segment).toBe("001");
+    expect(existsSync(join(j.dir, "000", ".done"))).toBe(true);
+    expect(existsSync(f.path)).toBe(true);
+    j.close();
+  });
+
+  it("a given-up frame leaves no file and is not counted", () => {
+    const j = new Journal({ sessions: tmp(), meta, now: () => T0 });
+    const f = j.reserveFrame();
+    writeFileSync(f.path, "x");
+    writeFileSync(`${f.path}.tmp`, "y");
+    f.done(false);
+    f.done(true); // settled once
+    expect(readdirSync(join(j.dir, "000", "frames"))).toEqual([]);
+    expect(j.frames).toBe(0);
+    expect(j.reserveFrame().n).toBe(1);
     j.close();
   });
 

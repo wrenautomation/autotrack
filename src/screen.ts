@@ -1,8 +1,11 @@
 /**
- * Frames. A 2 fps ring keeps the latest capture of the display under the cursor while input
+ * Frames. A 2 fps ring keeps the latest grab of the display under the cursor while input
  * happened in the last 5 s (idle = no capture). An act takes the ring's frame as "before" and a
- * fresh one 300 ms later as "after". While idle, a capture every 2 s is written only when it
- * differs from the last written frame. Each frame is written once and referenced by number.
+ * fresh one 300 ms later as "after". While idle, a grab every 2 s is written only when its hash
+ * differs from the last written frame's. Each frame is written once and referenced by number.
+ *
+ * Pixels never reach Node: the native helper holds the last few grabs and writes the JPEG; this
+ * keeps a slot reference and a 64-bit hash per grab.
  */
 import type { Display } from "./events.ts";
 
@@ -11,23 +14,30 @@ export const ACTIVE_MS = 5000;
 export const AFTER_MS = 300;
 export const IDLE_MS = 2000;
 
-/** One capture. `raw` is RGBA, read lazily (the capture itself stays native until then). */
+/** One grab, held by the helper. `token` is the capturer's own reference to it. */
 export interface Shot {
   display: string;
   width: number;
   height: number;
-  raw(): Promise<Uint8Array>;
-  /** Drop the pixels once the frame is written (24 MB at Retina); raw() is not called after. */
-  release?(): void;
+  /** 16 hex digits, see `differs`. */
+  hash: string;
+  token: unknown;
 }
 
 export interface Capturer {
   displays(): Display[];
-  /** The display under this logical point. */
-  capture(x: number, y: number): Promise<Shot | null>;
+  /** Grab the display under this logical point; null when it can't. */
+  grab(x: number, y: number): Promise<Shot | null>;
+  /** Write a grab as a JPEG at `path`; false when it can't (the grab was reused, or the write failed). */
+  save(shot: Shot, path: string): Promise<boolean>;
+  /** Stop the helper. */
+  close?(): void;
 }
 
-export type Encode = (rgba: Uint8Array, width: number, height: number) => Promise<Uint8Array>;
+/** Where the next frame goes: the journal. `done(false)` gives the reservation up. */
+export interface FrameSink {
+  reserveFrame(): { n: number; path: string; done(ok: boolean): void };
+}
 
 export interface Frame {
   shot: Shot;
@@ -37,8 +47,7 @@ export interface Frame {
 
 export interface ScreenOptions {
   capturer: Capturer;
-  encode: Encode;
-  write: (jpeg: Uint8Array) => number;
+  frames: FrameSink;
   now: () => number;
   /** True while nothing may be captured (paused, excluded app, locked). */
   blocked: () => boolean;
@@ -47,37 +56,28 @@ export interface ScreenOptions {
   log?: (msg: string) => void;
 }
 
-const GRID_W = 32;
-const GRID_H = 18;
+/** The hash is: byte 0 = mean luma of the top half, byte 1 = the bottom half, low 48 bits = a 9×6 difference hash. */
+const bits = (h: string) => BigInt(`0x${h}`);
 
-/** Luminance at a 32×18 grid of points: cheap, and enough to tell a page moved. */
-export function thumbHash(rgba: Uint8Array, width: number, height: number): Uint8Array {
-  const out = new Uint8Array(GRID_W * GRID_H);
-  for (let gy = 0; gy < GRID_H; gy++) {
-    const y = Math.floor(((gy + 0.5) * height) / GRID_H);
-    for (let gx = 0; gx < GRID_W; gx++) {
-      const x = Math.floor(((gx + 0.5) * width) / GRID_W);
-      const p = (y * width + x) * 4;
-      out[gy * GRID_W + gx] =
-        ((rgba[p] ?? 0) * 77 + (rgba[p + 1] ?? 0) * 150 + (rgba[p + 2] ?? 0) * 29) >> 8;
-    }
-  }
-  return out;
-}
-
-/** Changed when over 2% of grid points moved by more than 10 levels (a blinking caret is not). */
-export function differs(a: Uint8Array | null, b: Uint8Array): boolean {
-  if (!a || a.length !== b.length) return true;
-  let n = 0;
-  for (let i = 0; i < a.length; i++) if (Math.abs((a[i] ?? 0) - (b[i] ?? 0)) > 10) n++;
-  return n > a.length * 0.02;
+/**
+ * Changed when 3 or more of the 48 gradient bits flipped, or either half's mean luma moved by 2
+ * or more (a blinking caret or a ticking clock is neither).
+ */
+export function differs(a: string | null, b: string): boolean {
+  if (!a || !/^[0-9a-f]{16}$/.test(a) || !/^[0-9a-f]{16}$/.test(b)) return true;
+  const x = bits(a) ^ bits(b);
+  let flipped = 0;
+  for (let v = x & 0xffffffffffffn; v; v >>= 1n) flipped += Number(v & 1n);
+  const lumaTop = Math.abs(Number(bits(a) >> 56n) - Number(bits(b) >> 56n));
+  const lumaBottom = Math.abs(Number((bits(a) >> 48n) & 0xffn) - Number((bits(b) >> 48n) & 0xffn));
+  return flipped >= 3 || lumaTop >= 2 || lumaBottom >= 2;
 }
 
 export class Screen {
   private ring: Frame | null = null;
   private lastInput = Number.NEGATIVE_INFINITY;
   private cursor = { x: 0, y: 0 };
-  private lastHash: Uint8Array | null = null;
+  private lastHash: string | null = null;
   private lastWrite = Number.NEGATIVE_INFINITY;
   private capturing: Promise<Frame | null> | null = null;
 
@@ -133,15 +133,14 @@ export class Screen {
     if (this.active || this.o.blocked() || this.o.now() - this.lastWrite < IDLE_MS) return null;
     const f = await this.capture();
     if (!f) return null;
-    const raw = await f.shot.raw();
-    if (!differs(this.lastHash, thumbHash(raw, f.shot.width, f.shot.height))) return null;
+    if (!differs(this.lastHash, f.shot.hash)) return null;
     return this.number(f);
   }
 
   private capture(): Promise<Frame | null> {
     this.capturing ??= (async () => {
       try {
-        const shot = await this.o.capturer.capture(this.cursor.x, this.cursor.y);
+        const shot = await this.o.capturer.grab(this.cursor.x, this.cursor.y);
         if (!shot) return null;
         const f: Frame = { shot, at: this.o.now() };
         this.ring = f;
@@ -158,13 +157,19 @@ export class Screen {
 
   private async persist(f: Frame): Promise<number | null> {
     try {
-      const raw = await f.shot.raw();
-      this.lastHash = thumbHash(raw, f.shot.width, f.shot.height);
+      this.lastHash = f.shot.hash;
       this.lastWrite = this.o.now();
-      const jpeg = await this.o.encode(raw, f.shot.width, f.shot.height);
-      f.shot.release?.();
       if (this.o.blocked() || (this.o.mayWrite && !(await this.o.mayWrite()))) return null;
-      return this.o.write(jpeg);
+      const slot = this.o.frames.reserveFrame();
+      let ok = false;
+      try {
+        ok = await this.o.capturer.save(f.shot, slot.path);
+        if (ok && this.o.blocked()) ok = false; // paused while saving: the file is deleted
+      } finally {
+        slot.done(ok);
+      }
+      if (!ok) this.o.log?.("screen: frame not saved");
+      return ok ? slot.n : null;
     } catch (e) {
       this.o.log?.(`screen: frame failed: ${(e as Error).message}`);
       return null;

@@ -20,7 +20,7 @@ import {
 import { Journal } from "./journal.ts";
 import { type Gate, blocked as gateOf, holdForFocus, makeGate, textOf } from "./privacy.ts";
 import type { AtAnswer, FocusedAnswer, FrontAnswer, PermAnswer } from "./probe.ts";
-import { type Capturer, type Encode, type Frame, Screen } from "./screen.ts";
+import { type Capturer, type Frame, Screen } from "./screen.ts";
 import type { Shipper } from "./ship.ts";
 
 export const FOLD_TICK_MS = 100;
@@ -47,7 +47,6 @@ export interface RecorderDeps {
   meta: Omit<SessionMeta, "v" | "session" | "startedAt" | "endedAt" | "displays" | "device">;
   probe: ProbeLike;
   capturer: Capturer;
-  encode: Encode;
   /** Starts the input hook; returns its stop. */
   hook: (onRaw: (r: Raw) => void) => () => void;
   coords?: () => Coords;
@@ -130,8 +129,7 @@ export class Recorder {
     });
     this.screen = new Screen({
       capturer: d.capturer,
-      encode: d.encode,
-      write: (jpeg) => this.journal.writeFrame(jpeg),
+      frames: this.journal,
       now: () => this.clock.now(),
       blocked: () => this.paused !== null,
       mayWrite: async () => gateOf(this.gate, ...frontParts(await this.front())) === null,
@@ -180,6 +178,7 @@ export class Recorder {
     await this.chain;
     this.journal.close();
     this.d.probe.close();
+    this.d.capturer.close?.();
   }
 
   pause(reason: "hotkey" | "cli"): void {

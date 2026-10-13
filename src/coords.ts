@@ -1,6 +1,6 @@
 /**
  * Logical points vs physical pixels, in one place. Events log logical points. On Mac uiohook,
- * the probe and node-screenshots all speak logical points already. On Windows uiohook and the
+ * the probe and the shots helper all speak logical points already. On Windows uiohook and the
  * probe speak physical pixels on the virtual desktop: divide by the display's scale for events,
  * multiply back for the probe.
  */

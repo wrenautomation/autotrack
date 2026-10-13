@@ -1,175 +1,198 @@
 /**
- * The real screen: node-screenshots for captures and display geometry, and a worker thread
- * for JPEG encoding (inline when a worker can't start).
+ * The real screen, through the native helper's `--shots` mode (helpers/mac/probe, helpers/win/probe.ps1):
+ * it grabs a display into a ring of the last few grabs in its own memory, answers a slot and a
+ * hash, and writes the JPEG when asked. Node keeps slot numbers and hashes, never pixels.
  *
- * Memory: a Retina capture is 24 MB of native memory V8 can't see, freed only when its JS
- * wrapper is collected, so each capture first runs a minor GC. Frames reach the worker through
- * one reused SharedArrayBuffer (the capture's buffer can't be transferred), one at a time.
+ * It is a second process next to the probe, so a capture never delays a probe answer. A missing or
+ * failing helper means no frames; the recorder carries on without them.
  */
-import { setFlagsFromString } from "node:v8";
-import { runInNewContext } from "node:vm";
-import { Worker } from "node:worker_threads";
-import type { Screen as CoordScreen, Coords } from "./coords.ts";
+import type { Screen as CoordScreen } from "./coords.ts";
 import type { Display } from "./events.ts";
-import { encodeJpeg, fitSize } from "./jpeg.ts";
-import type { FrontAnswer } from "./probe.ts";
-import type { Capturer, Encode, Shot } from "./screen.ts";
+import { HelperClient, helperCommand, spawnHelper } from "./helper.ts";
+import type { Capturer, Shot } from "./screen.ts";
 
-type Monitor = import("node-screenshots").Monitor;
+/** JPEG quality of every frame. */
+export const QUALITY = 70;
 
-/** A minor GC, or nothing when the flag can't be set. */
-export const collect: () => void = (() => {
-  try {
-    setFlagsFromString("--expose-gc");
-    const gc = runInNewContext("gc") as (o: { type: "minor" }) => void;
-    return () => gc({ type: "minor" });
-  } catch {
-    return () => {};
+const GRAB_MS = 2500;
+const SAVE_MS = 4000;
+const DISPLAYS_MS = 3000;
+
+/** A display as the helper reports it: logical points, plus the OS's own rect and DPI scale. */
+export interface ShotsDisplay extends Display {
+  os?: CoordScreen;
+}
+
+export interface GrabAnswer {
+  slot: number;
+  seq?: number;
+  w: number;
+  h: number;
+  hash: string;
+  error?: string;
+}
+
+export interface SaveAnswer {
+  ok: boolean;
+  bytes?: number;
+  error?: string;
+}
+
+export class Shots extends HelperClient {
+  private readonly grabMs: number;
+  private readonly saveMs: number;
+
+  /** `timeoutMs` replaces the grab, save and displays deadlines (tests). */
+  constructor(opts: ConstructorParameters<typeof HelperClient>[0]) {
+    super({ ...opts, name: "shots" });
+    this.grabMs = opts.timeoutMs ?? GRAB_MS;
+    this.saveMs = opts.timeoutMs ?? SAVE_MS;
   }
-})();
 
-export async function nodeCapturer(coords: () => Coords): Promise<Capturer> {
-  const { Monitor } = await import("node-screenshots");
-  const logical = (m: Monitor) =>
-    coords().rect({ x: m.x(), y: m.y(), width: m.width(), height: m.height() });
-  return {
-    displays(): Display[] {
-      return Monitor.all().map((m) => {
-        const r = logical(m);
-        const frame = fitSize(r.width * m.scaleFactor(), r.height * m.scaleFactor());
-        return {
-          id: String(m.id()),
-          ...r,
-          scale: Math.round((frame.width / r.width) * 1000) / 1000,
-          primary: m.isPrimary(),
-        };
-      });
-    },
-    async capture(x, y): Promise<Shot | null> {
-      const p = coords().toPhysical(x, y);
-      const m = Monitor.fromPoint(p.x, p.y) ?? Monitor.all().find((d) => d.isPrimary()) ?? null;
-      if (!m) return null;
-      collect();
-      let img: Awaited<ReturnType<Monitor["captureImage"]>> | null = await m.captureImage();
-      let raw: Promise<Uint8Array> | null = null;
-      return {
-        display: String(m.id()),
-        width: img.width,
-        height: img.height,
-        raw: () => {
-          raw ??= img ? img.toRaw() : Promise.reject(new Error("frame released"));
-          return raw;
-        },
-        release: () => {
-          img = null;
-          raw = null;
-        },
-      };
-    },
-  };
+  displays(timeoutMs?: number): Promise<{ displays?: ShotsDisplay[] } | null> {
+    return this.call(
+      "displays",
+      {},
+      timeoutMs ?? (this.grabMs === GRAB_MS ? DISPLAYS_MS : this.grabMs),
+    );
+  }
+  grab(display: string): Promise<GrabAnswer | null> {
+    return this.call("grab", { display }, this.grabMs);
+  }
+  save(slot: number, seq: number | undefined, path: string): Promise<SaveAnswer | null> {
+    const args = { slot, ...(seq !== undefined ? { seq } : {}), path, quality: QUALITY };
+    return this.call("save", args, this.saveMs);
+  }
 }
 
-/** Displays as the OS reports them (physical pixels on Windows), for `coordsFor`. */
-export async function osScreens(): Promise<CoordScreen[]> {
-  const { Monitor } = await import("node-screenshots");
-  return Monitor.all().map((m) => ({
-    x: m.x(),
-    y: m.y(),
-    width: m.width(),
-    height: m.height(),
-    scale: m.scaleFactor(),
-  }));
+/** The shots helper for this OS, or one that answers null when it is missing. */
+export function openShots(log?: (msg: string) => void): Shots {
+  const cmd = helperCommand(process.platform, undefined, "shots");
+  return new Shots({ spawn: cmd ? spawnHelper(cmd) : null, ...(log ? { log } : {}) });
 }
 
-/** The display id under a logical point, without capturing. */
-export async function displayAt(
-  coords: () => Coords,
-): Promise<(x: number, y: number) => string | undefined> {
-  const { Monitor } = await import("node-screenshots");
-  return (x, y) => {
-    const p = coords().toPhysical(x, y);
-    const m = Monitor.fromPoint(p.x, p.y);
-    return m ? String(m.id()) : undefined;
-  };
+/** What the helper's grab token holds: which slot, which grab, which helper start. */
+interface Token {
+  slot: number;
+  seq: number | undefined;
+  start: number;
 }
 
 /**
- * Front app and window from the window list, for when the probe helper is missing: no bundle id
- * or exe path, so excluded apps match by name only.
+ * The recorder's capturer over a shots client. `refresh()` reads the display list (call it before
+ * the recorder starts, then now and then); `displays()`, `displayAt` and `screens()` answer from
+ * that list.
  */
-export async function windowFront(coords: () => Coords): Promise<() => FrontAnswer | null> {
-  const { Window } = await import("node-screenshots");
-  return () => {
-    const focused = Window.all().filter((w) => w.isFocused() && !w.isMinimized());
-    const w = focused.find((f) => f.title()) ?? focused[0];
-    if (!w) return null;
+export class ShotsCapturer implements Capturer {
+  private list: ShotsDisplay[] = [];
+  private readonly shots: Shots;
+  private readonly log: ((msg: string) => void) | undefined;
+  private lastError = "";
+
+  constructor(shots: Shots, log?: (msg: string) => void) {
+    this.shots = shots;
+    this.log = log;
+  }
+
+  /**
+   * Re-read the display list; keeps the old one when the helper doesn't answer. The first call
+   * after start can be slow (PowerShell compiles its code before it reads a request).
+   */
+  async refresh(timeoutMs?: number): Promise<boolean> {
+    const a = await this.shots.displays(timeoutMs);
+    if (!a?.displays?.length) return false;
+    this.list = a.displays;
+    return true;
+  }
+
+  displays(): Display[] {
+    return this.list.map(({ os: _os, ...d }) => d);
+  }
+
+  /** Displays in the OS's own units, for `coordsFor`. */
+  screens(): CoordScreen[] {
+    return this.list.flatMap((d) => (d.os ? [d.os] : []));
+  }
+
+  /** The display id under a logical point, without capturing. */
+  close(): void {
+    this.shots.close();
+  }
+
+  displayAt = (x: number, y: number): string | undefined => this.at(x, y)?.id;
+
+  private at(x: number, y: number): ShotsDisplay | undefined {
+    return this.list.find((d) => x >= d.x && y >= d.y && x < d.x + d.width && y < d.y + d.height);
+  }
+
+  async grab(x: number, y: number): Promise<Shot | null> {
+    if (!this.list.length) await this.refresh(); // the helper wasn't up at start
+    const d = this.at(x, y) ?? this.list.find((e) => e.primary) ?? this.list[0];
+    if (!d) return null;
+    const start = this.shots.starts;
+    const a = await this.shots.grab(d.id);
+    if (!a || a.error || typeof a.slot !== "number") {
+      this.note(a?.error ?? "no answer");
+      return null;
+    }
     return {
-      app: { name: w.appName(), id: "", pid: w.pid() },
-      window: coords().rect({
-        title: w.title(),
-        x: w.x(),
-        y: w.y(),
-        width: w.width(),
-        height: w.height(),
-      }),
+      display: d.id,
+      width: a.w,
+      height: a.h,
+      hash: a.hash,
+      token: { slot: a.slot, seq: a.seq, start } satisfies Token,
     };
-  };
+  }
+
+  async save(shot: Shot, path: string): Promise<boolean> {
+    const t = shot.token as Token;
+    if (t.start !== this.shots.starts) return false; // the helper restarted: its slots are gone
+    const a = await this.shots.save(t.slot, t.seq, path);
+    if (!a?.ok) {
+      this.note(a?.error ?? "no answer");
+      return false;
+    }
+    return true;
+  }
+
+  /** Log a failure once per distinct message, not every 500 ms. */
+  private note(error: string): void {
+    if (error === this.lastError) return;
+    this.lastError = error;
+    this.log?.(`screen: ${error}`);
+  }
 }
 
-const inline: Encode = async (rgba, w, h) => encodeJpeg(rgba, w, h);
+export interface FramesCheck {
+  ok: boolean;
+  /** One line for `doctor`. */
+  message: string;
+}
 
-/** Encode on a worker thread; inline if the worker fails to start or dies. */
-export function workerEncoder(log?: (msg: string) => void): { encode: Encode; close(): void } {
-  const ext = import.meta.url.endsWith(".ts") ? "ts" : "js";
-  let worker: Worker | null = null;
-  try {
-    worker = new Worker(new URL(`./jpeg-worker.${ext}`, import.meta.url));
-    worker.unref();
-  } catch (e) {
-    log?.(`screen: encoder worker failed, encoding inline: ${(e as Error).message}`);
-  }
-  let next = 1;
-  const waiting = new Map<
-    number,
-    { resolve: (b: Uint8Array) => void; reject: (e: Error) => void }
-  >();
-  worker?.on("message", (m: { id: number; jpeg?: Uint8Array; error?: string }) => {
-    const w = waiting.get(m.id);
-    waiting.delete(m.id);
-    if (m.jpeg) w?.resolve(m.jpeg);
-    else w?.reject(new Error(m.error ?? "encode failed"));
-  });
-  worker?.on("error", (e) => {
-    log?.(`screen: encoder worker died, encoding inline: ${e.message}`);
-    worker = null;
-    for (const w of waiting.values()) w.reject(e);
-    waiting.clear();
-  });
-  let shared: SharedArrayBuffer | null = null;
-  let turn: Promise<unknown> = Promise.resolve();
-  const viaWorker = (w: Worker, rgba: Uint8Array, width: number, height: number) => {
-    if (!shared || shared.byteLength < rgba.length) shared = new SharedArrayBuffer(rgba.length);
-    const view = new Uint8Array(shared, 0, rgba.length);
-    view.set(rgba);
-    const id = next++;
-    return new Promise<Uint8Array>((resolve, reject) => {
-      waiting.set(id, { resolve, reject });
-      w.postMessage({ id, rgba: view, width, height });
-    });
-  };
+/** For `doctor`: grab the primary display and save it, so a missing permission or helper shows. */
+export async function checkFrames(shots: Shots, path: string): Promise<FramesCheck> {
+  if (!shots.available)
+    return { ok: false, message: "shots helper missing: no frames are recorded" };
+  const capturer = new ShotsCapturer(shots);
+  if (!(await capturer.refresh(15_000)))
+    return { ok: false, message: "shots helper does not answer: no frames are recorded" };
+  const t0 = performance.now();
+  const shot = await capturer.grab(0, 0);
+  const t1 = performance.now();
+  if (!shot)
+    return {
+      ok: false,
+      message:
+        process.platform === "darwin"
+          ? "cannot grab the screen (Screen Recording not granted?): no frames are recorded"
+          : "cannot grab the screen: no frames are recorded",
+    };
+  const saved = await capturer.save(shot, path);
+  const t2 = performance.now();
+  if (!saved)
+    return { ok: false, message: "grabbed a frame but cannot save it: no frames are recorded" };
   return {
-    encode(rgba, width, height) {
-      const run = async () => {
-        const w = worker;
-        return w ? viaWorker(w, rgba, width, height) : inline(rgba, width, height);
-      };
-      const result = turn.then(run, run); // one at a time: the shared buffer is reused
-      turn = result.catch(() => {});
-      return result;
-    },
-    close() {
-      void worker?.terminate();
-      worker = null;
-    },
+    ok: true,
+    message: `frames ${shot.width}x${shot.height}, grab ${Math.round(t1 - t0)} ms, save ${Math.round(t2 - t1)} ms`,
   };
 }

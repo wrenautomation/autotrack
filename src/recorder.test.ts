@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -45,15 +45,19 @@ function setup(opts: { focused?: () => { element: Element | null } | null } = {}
   };
   const capturer: Capturer = {
     displays: () => [{ id: "1", x: 0, y: 0, width: 64, height: 36, scale: 1, primary: true }],
-    capture: async () => {
+    grab: async () => {
       shade += 40;
-      const v = shade % 256;
       return {
         display: "1",
         width: 64,
         height: 36,
-        raw: async () => new Uint8Array(64 * 36 * 4).fill(v),
+        hash: ((BigInt(shade % 256) << 56n) | 0n).toString(16).padStart(16, "0"),
+        token: shade,
       };
+    },
+    save: async (_shot, path) => {
+      writeFileSync(path, new Uint8Array([0xff, 0xd8, 0xff, 0xd9]));
+      return true;
     },
   };
   const rec = new Recorder({
@@ -62,7 +66,6 @@ function setup(opts: { focused?: () => { element: Element | null } | null } = {}
     meta: { os: "darwin", osVersion: "1", arch: "arm64", trackVersion: "0.0.0" },
     probe,
     capturer,
-    encode: async () => new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
     hook: (fn) => {
       onRaw = fn;
       return () => {};

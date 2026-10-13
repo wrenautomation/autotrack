@@ -13,6 +13,7 @@ import {
   readdirSync,
   readFileSync,
   statSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -92,6 +93,7 @@ export class Journal {
   private segEvents = 0;
   private segFrames = 0;
   private frameNo = 0;
+  private pending = 0; // reserved frames not yet saved
   private readonly now: () => number;
   private closed = false;
   events = 0;
@@ -133,15 +135,37 @@ export class Journal {
     this.events++;
   }
 
-  /** Write one frame into the current segment; returns its session-wide number. */
-  writeFrame(jpeg: Uint8Array): number {
+  /**
+   * Reserve the next frame in the current segment: its session-wide number and the path the
+   * helper writes it to. The segment stays open until `done` (an in-flight save must not lose its
+   * folder to a rotation); `done(false)` gives the number up and removes any file.
+   */
+  reserveFrame(): { n: number; path: string; done(ok: boolean): void } {
     if (this.closed) throw new Error("journal closed");
     this.rotateIfDue(false);
     const n = this.frameNo++;
-    writeFileSync(join(this.segDir, "frames", `${n}.jpg`), jpeg);
-    this.frames++;
-    this.segFrames++;
-    return n;
+    const path = join(this.segDir, "frames", `${n}.jpg`);
+    this.pending++;
+    let settled = false;
+    return {
+      n,
+      path,
+      done: (ok) => {
+        if (settled) return;
+        settled = true;
+        this.pending--;
+        if (ok) {
+          this.frames++;
+          this.segFrames++;
+          return;
+        }
+        for (const p of [path, `${path}.tmp`]) {
+          try {
+            unlinkSync(p);
+          } catch {}
+        }
+      },
+    };
   }
 
   /** Close the segment when it is due by time, even with nothing new to write. */
@@ -161,7 +185,7 @@ export class Journal {
   private rotateIfDue(byCount = true): void {
     const full = byCount && this.segEvents >= (this.opts.segmentEvents ?? SEGMENT_EVENTS);
     const old = this.now() - this.segOpenedAt >= (this.opts.segmentMs ?? SEGMENT_MS);
-    if (!full && !old) return;
+    if ((!full && !old) || this.pending > 0) return; // a save in flight keeps its segment open
     if (this.segEvents === 0 && this.segFrames === 0) {
       this.segOpenedAt = this.now(); // an idle segment stays open rather than ship empty
       return;

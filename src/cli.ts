@@ -20,15 +20,16 @@ import { arch, release, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { displayAt, nodeCapturer, osScreens, windowFront, workerEncoder } from "./capture.ts";
+import { checkFrames, openShots, ShotsCapturer } from "./capture.ts";
 import { type Config, dataDir, loadConfig, sessionsDir } from "./config.ts";
 import { type Command, lock, type Request, runningPid, send, serve } from "./control.ts";
-import { type Coords, coordsFor, identity } from "./coords.ts";
+import { type Coords, coordsFor } from "./coords.ts";
 import { startHook, uiohook } from "./hook.ts";
 import { notify } from "./notify.ts";
 import { helperCommand, openProbe, PACKAGE_ROOT } from "./probe.ts";
 import { Recorder, type Status } from "./recorder.ts";
 import { noShipper, type Shipper, shipperFor } from "./ship.ts";
+import { syntheticHook, syntheticRate } from "./synthetic.ts";
 import { removeLaterWin, uninstall } from "./uninstall.ts";
 
 const VERSION = (() => {
@@ -70,36 +71,39 @@ async function openRecorder(
   const probe = openProbe(opts.log);
   if (!probe.available)
     opts.log("probe helper missing: no element or app info, text is written redacted");
-  let coords: Coords = identity;
-  const refresh = async () => {
-    coords = coordsFor(process.platform, await osScreens());
+  const shots = openShots(opts.log);
+  if (!shots.available) opts.log("shots helper missing: no frames are recorded");
+  const capturer = new ShotsCapturer(shots, opts.log);
+  await capturer.refresh(15_000);
+  let coords: Coords = coordsFor(process.platform, capturer.screens());
+  setInterval(() => {
+    void capturer.refresh().then((ok) => {
+      if (ok) coords = coordsFor(process.platform, capturer.screens());
+    });
+  }, 30_000).unref();
+  const synthetic = syntheticRate(process.env.AUTOTRACK_SYNTHETIC); // load tests only
+  const source = synthetic ? null : await uiohook();
+  const area = () => {
+    const ds = capturer.displays();
+    return ds.find((d) => d.primary) ?? ds[0] ?? { x: 0, y: 0, width: 1400, height: 800 };
   };
-  await refresh();
-  setInterval(() => void refresh().catch(() => {}), 30_000).unref();
-  const encoder = workerEncoder(opts.log);
-  const source = await uiohook();
   const recorder = new Recorder({
     sessions: sessionsDir(data),
     config,
     meta: { os: process.platform, osVersion: osVersion(), arch: arch(), trackVersion: VERSION },
     probe,
-    capturer: await nodeCapturer(() => coords),
-    encode: encoder.encode,
-    hook: (onRaw) => {
-      const stop = startHook(
-        source,
-        () => coords,
-        () => performance.now(),
-        onRaw,
-      );
-      return () => {
-        stop();
-        encoder.close();
-      };
-    },
+    capturer,
+    hook: (onRaw) =>
+      synthetic
+        ? syntheticHook(synthetic, area)(onRaw)
+        : startHook(
+            source as NonNullable<typeof source>,
+            () => coords,
+            () => performance.now(),
+            onRaw,
+          ),
     coords: () => coords,
-    displayAt: await displayAt(() => coords),
-    ...(probe.available ? {} : { frontFallback: await windowFront(() => coords) }),
+    displayAt: capturer.displayAt,
     ...(opts.notify ? { notify: (m: string) => notify(m) } : {}),
     shipper: opts.shipper,
     log: opts.log,
@@ -259,6 +263,12 @@ async function doctor(data: string): Promise<number> {
       ? `probe helper ${helper.path}`
       : "probe helper missing: no element or app info, text is written redacted",
   );
+  const shots = openShots();
+  const framesFile = join(tmpdir(), `autotrack-doctor-${process.pid}.jpg`);
+  const frames = await checkFrames(shots, framesFile);
+  shots.close();
+  rmSync(framesFile, { force: true });
+  line(frames.ok, frames.message);
   if (process.platform === "darwin") {
     const probe = openProbe();
     const perm = probe.available ? await probe.perm(3000) : null;
@@ -288,20 +298,6 @@ async function doctor(data: string): Promise<number> {
   line(m.rssMb < 200, `RSS ${m.rssMb} MB (budget 200 MB)`);
   console.log(warnings ? `${warnings} warning(s)` : "all good");
   return warnings ? 1 : 0;
-}
-
-/**
- * Mac: freed 24 MB capture buffers stay in malloc's large cache (~150 MB of RSS). The switch is
- * read at process start, so the recorder (and doctor's measure) relaunch once with it off.
- */
-function relaunch(): Promise<number> | null {
-  if (process.platform !== "darwin" || process.env.MallocLargeCache !== undefined) return null;
-  const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
-    stdio: "inherit",
-    env: { ...process.env, MallocLargeCache: "0" },
-  });
-  for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => child.kill(sig));
-  return new Promise((resolve) => child.on("exit", (code) => resolve(code ?? 1)));
 }
 
 /** One pass now, backoff ignored. Exit 1 when anything is left or nothing could ship. */
@@ -377,14 +373,14 @@ export async function main(argv: string[]): Promise<number> {
   const data = dataDir();
   switch (cmd) {
     case "start":
-      return (entry && relaunch()) || start(data);
+      return start(data);
     case "stop":
     case "pause":
     case "resume":
     case "status":
       return control(data, cmd);
     case "doctor":
-      return (entry && relaunch()) || doctor(data);
+      return doctor(data);
     case "ship":
       return shipNow(data);
     case "uninstall":
