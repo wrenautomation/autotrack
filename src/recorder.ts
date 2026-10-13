@@ -419,8 +419,8 @@ export class Recorder {
 
   /**
    * Capture the front window's tree when one is wanted (a focus change, an act that moved the
-   * screen), at most once a second, one at a time. Its event's t is when it was asked for; the
-   * same tree twice is written once.
+   * screen), at most once a second, one at a time. Its event's t is when the answer came (an act
+   * that began during the walk is in the chain already); the same tree twice is written once.
    */
   async treeTick(): Promise<void> {
     const probe = this.d.probe;
@@ -434,7 +434,6 @@ export class Recorder {
     this.treeWanted = false;
     this.treeBusy = true;
     this.treeAt = now;
-    const t = this.t(now);
     let f: FrontAnswer | null;
     let a: TreeAnswer | null;
     try {
@@ -443,6 +442,8 @@ export class Recorder {
       this.treeBusy = false;
     }
     if (!a || !Array.isArray(a.nodes)) return;
+    // t when the answer came: an act that began during the walk is in the chain already.
+    const t = this.t(this.clock.now());
     const tree = a;
     const front = f ?? this.lastFront;
     this.side(t, () =>

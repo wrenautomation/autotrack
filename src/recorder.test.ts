@@ -35,7 +35,7 @@ function setup(
       timeoutMs?: number,
       waitMs?: number,
     ) => { element: Element | null } | null;
-    tree?: () => TreeAnswer | null;
+    tree?: () => TreeAnswer | null | Promise<TreeAnswer | null>;
     ask?: (q: string) => Promise<string | null>;
   } = {},
 ) {
@@ -58,7 +58,7 @@ function setup(
     front: async () => front,
     focused: async () => (opts.focused ? opts.focused() : { element: field(false) }),
     perm: async () => ({ accessibility: true, screen: true, input: true }),
-    ...(opts.tree ? { tree: async () => (opts.tree as () => TreeAnswer | null)() } : {}),
+    ...(opts.tree ? { tree: async () => (opts.tree as () => Promise<TreeAnswer | null>)() } : {}),
     watchClipboard: (fn) => {
       onClip = fn;
     },
@@ -554,6 +554,29 @@ describe("recorder signal", () => {
       ms: 5,
     });
     expect(r.rec.status().trees).toBe(2);
+  });
+
+  it("a tree whose walk outlasts a click is written after it, at the time its answer came", async () => {
+    let answer: (a: TreeAnswer) => void = () => {};
+    const r = setup({
+      tree: () =>
+        new Promise<TreeAnswer>((res) => {
+          answer = res;
+        }),
+    });
+    r.click(0);
+    await r.rec.settled();
+    r.at(1000);
+    const walking = r.rec.treeTick();
+    r.click(1100);
+    await r.rec.settled();
+    r.at(1300);
+    answer(tree("OK"));
+    await walking;
+    await r.rec.stop();
+    const ev = r.events().filter((e) => e.kind !== "frame");
+    expect(ev.map((e) => e.kind)).toEqual(["click", "click", "tree"]);
+    expect(ev.at(-1)?.t).toBe(1300);
   });
 
   it("tree names pass through secret redaction", async () => {
