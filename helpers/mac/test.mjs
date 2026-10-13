@@ -141,17 +141,39 @@ check(Number(p(0.95)) < 50, `p95 ${p(0.95)} ms is not under 50 ms`);
   if (!existsSync(out)) failures.push("value-fields fixture did not come up");
   else {
     const f = JSON.parse(readFileSync(out, "utf8"));
-    const answers = [];
-    for (const c of f.fields)
-      answers.push(await ask({ op: "at", x: Math.round(c.x), y: Math.round(c.y) }));
+    const atField = (c) => ask({ op: "at", x: Math.round(c.x), y: Math.round(c.y) });
+    // A new app's AX tree takes a moment; wait (5 s at most) until the first field answers as its.
+    let first = null;
+    let last = null;
+    for (let i = 0; i < 50 && !first; i++) {
+      last = await atField(f.fields[0]);
+      if (last.element?.role === "textfield") first = last;
+      else await new Promise((r) => setTimeout(r, 100));
+    }
+    const answers = [first ?? last];
+    for (const c of f.fields.slice(1)) answers.push(await atField(c));
     answers.push(await ask({ op: "focused" }));
     console.log("value fields", JSON.stringify(answers.map((a) => a.element)));
     check(!JSON.stringify(answers).includes(f.typed), "a typed value came back in an answer");
-    if (perm.accessibility) {
+    if (perm.accessibility && !first) {
+      const fr = await ask({ op: "front" });
+      failures.push(
+        `setup: the value-fields window was not at ${JSON.stringify(f.fields[0])} (got ${JSON.stringify(last?.element)}, front ${fr.app?.id})`,
+      );
+    } else if (perm.accessibility) {
       const [titled, labelled, email] = answers.map((a) => a.element);
-      check(titled?.role === "textfield" && titled.name === "", "a field titled by its value has name \"\"");
-      check(labelled?.role === "textfield" && labelled.name === "", "a field labelled with its value has name \"\"");
-      check(email?.role === "textfield" && email.name === "Email", "a field titled Email keeps its name");
+      check(
+        titled?.role === "textfield" && titled.name === "",
+        'a field titled by its value has name ""',
+      );
+      check(
+        labelled?.role === "textfield" && labelled.name === "",
+        'a field labelled with its value has name ""',
+      );
+      check(
+        email?.role === "textfield" && email.name === "Email",
+        "a field titled Email keeps its name",
+      );
     }
   }
   const exited = new Promise((res) => app.on("exit", res));

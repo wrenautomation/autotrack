@@ -30,7 +30,9 @@ final class Delegate: NSObject, NSApplicationDelegate {
       window.contentView!.addSubview(f)
       fields.append(f)
     }
-    window.setFrameOrigin(NSPoint(x: 60, y: 200))
+    // Top left, away from the screen center where system prompts appear.
+    let vis = NSScreen.screens[0].visibleFrame
+    window.setFrameTopLeftPoint(NSPoint(x: vis.minX + 20, y: vis.maxY - 20))
     window.level = .floating
     window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)

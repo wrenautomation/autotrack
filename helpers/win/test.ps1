@@ -131,9 +131,19 @@ try {
         Check ($foc.element.secure -eq $false) 'the text box reported secure'
     }
 
-    $cond = New-Object System.Windows.Automation.PropertyCondition ($UIA::AutomationIdProperty), 'notes'
-    $edit = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    if ($null -eq $edit) { Fail 'no notes box found in the test form' }
+    # WinForms' AutomationId is not the control's Name here, so the two boxes are told apart by
+    # height: the multiline notes box is tall, the titled box one line.
+    $ct = $UIA::ControlTypeProperty
+    $boxCond = New-Object System.Windows.Automation.OrCondition -ArgumentList @(
+        (New-Object System.Windows.Automation.PropertyCondition $ct, ([System.Windows.Automation.ControlType]::Edit)),
+        (New-Object System.Windows.Automation.PropertyCondition $ct, ([System.Windows.Automation.ControlType]::Document)))
+    $boxes = @($win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $boxCond)) |
+        Sort-Object { $_.Current.BoundingRectangle.Height }
+    $roles = ($boxes | ForEach-Object { '{0} {1}px' -f $_.Current.ControlType.ProgrammaticName, [int]$_.Current.BoundingRectangle.Height }) -join ', '
+    Write-Host "text boxes in the form: $roles"
+    $edit = $null; $titled = $null
+    if ($boxes.Count -ge 2) { $titled = $boxes[0]; $edit = $boxes[$boxes.Count - 1] }
+    if ($null -eq $edit) { Fail "expected two text boxes in the test form, found: $roles" }
     else {
         $r = $edit.Current.BoundingRectangle
         $cx = [int]($r.X + $r.Width / 2); $cy = [int]($r.Y + $r.Height / 2)
@@ -149,10 +159,7 @@ try {
     }
 
     # a box whose accessible name is its own text: the name must not come back
-    $cond = New-Object System.Windows.Automation.PropertyCondition ($UIA::AutomationIdProperty), 'titled'
-    $titled = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    if ($null -eq $titled) { Fail 'no titled box found in the test form' }
-    else {
+    if ($null -ne $titled) {
         $r = $titled.Current.BoundingRectangle
         $tx = [int]($r.X + $r.Width / 2); $ty = [int]($r.Y + $r.Height / 2)
         $ta = Ask @{ op = 'at'; x = $tx; y = $ty }
