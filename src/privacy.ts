@@ -1,6 +1,7 @@
 /**
- * What never gets recorded: keys typed into a password field, secret-shaped text, anything while
- * an excluded app (password managers, banking) or the lock screen is in front.
+ * What never gets recorded: keys typed into a password field, secret-shaped text, clipboard text
+ * from a password field or a concealed copy, anything while an excluded app (password managers,
+ * banking) or the lock screen is in front.
  */
 import type { App, Element, WindowInfo } from "./events.ts";
 
@@ -59,6 +60,25 @@ export function textOf(
 ): { text: string; redacted: boolean } {
   if (!focused || focused.element?.secure) return { text: "", redacted: true };
   return redactSecrets(text);
+}
+
+export const CLIPBOARD_TEXT_MAX = 2000;
+
+/**
+ * A clipboard change's text as written: redacted, then at most 2,000 characters. None when the
+ * copy was concealed or made under secure input, or when the focused element is secure or did not
+ * answer (`focused` null): then only `redacted: true` says text was there.
+ */
+export function clipboardText(
+  c: { text?: string; length: number; concealed: boolean; secure?: boolean },
+  focused: { element: Element | null } | null,
+): { text?: string; redacted: boolean } {
+  const has = c.text !== undefined || c.length > 0;
+  if (c.concealed || c.secure) return { redacted: has || c.concealed };
+  if (!has) return { redacted: false };
+  if (!focused || focused.element?.secure || c.text === undefined) return { redacted: true };
+  const r = redactSecrets(c.text);
+  return { text: r.text.slice(0, CLIPBOARD_TEXT_MAX), redacted: r.redacted };
 }
 
 /**

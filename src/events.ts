@@ -60,6 +60,17 @@ export interface WebTarget {
   rect?: { x: number; y: number; width: number; height: number };
 }
 
+/**
+ * What an act did, known once its after-frame is (Signal): the frame hash moved, the front app or
+ * window changed, a dialog appeared, a window of the same app opened or closed.
+ */
+export interface Out {
+  screen: boolean;
+  focus: boolean;
+  dialog: boolean;
+  window: boolean;
+}
+
 /** What a web act did, on a follow-up `act: "effect"` event 1 s later. */
 export interface WebEffects {
   /** When it changed. */
@@ -83,6 +94,9 @@ export type Event = Base &
         element?: Element;
         before?: number;
         after?: number;
+        out?: Out;
+        /** The latest `tree` written before the act. */
+        tree?: number;
       }
     | {
         kind: "drag";
@@ -94,6 +108,9 @@ export type Event = Base &
         element?: Element;
         before?: number;
         after?: number;
+        out?: Out;
+        /** The latest `tree` written before the act. */
+        tree?: number;
       }
     /** wheel ticks folded per 250 ms */
     | {
@@ -105,6 +122,9 @@ export type Event = Base &
         element?: Element;
         before?: number;
         after?: number;
+        out?: Out;
+        /** The latest `tree` written before the act. */
+        tree?: number;
       }
     /** printable keys folded, ends at 1 s idle, a click, or a non-text key */
     | {
@@ -114,6 +134,9 @@ export type Event = Base &
         element?: Element;
         before?: number;
         after?: number;
+        out?: Out;
+        /** The latest `tree` written before the act. */
+        tree?: number;
       }
     /** enter, tab, arrows, esc, backspace runs, and any combo */
     | {
@@ -123,6 +146,9 @@ export type Event = Base &
         element?: Element;
         before?: number;
         after?: number;
+        out?: Out;
+        /** The latest `tree` written before the act. */
+        tree?: number;
       }
     /** app or window changed (app/window on Base) */
     | { kind: "focus" }
@@ -141,8 +167,19 @@ export type Event = Base &
         y?: number;
         target?: WebTarget;
         effects?: WebEffects;
+        /** `snapshot`: the page outline; over 2 KB it is stored as `trees/<n>.txt`, see `treeFile`. */
+        tree?: string;
+        treeFile?: number;
       }
     | { kind: "app"; url: string; action: string; detail: unknown }
+    /** the front window's accessibility tree, stored as `trees/<n>.json` in the segment */
+    | { kind: "tree"; tree: number }
+    /** the front window became an alert, sheet or modal dialog; text ≤ 300 */
+    | { kind: "dialog"; title: string; text: string; buttons: string[] }
+    /** the clipboard changed; text ≤ 2,000, none from a secure field or concealed copy */
+    | { kind: "clipboard"; types: string[]; length: number; text?: string; redacted: boolean }
+    /** the person's own "why" (Ctrl+Alt+Shift+T); an empty answer is `goal: "", done: true` */
+    | { kind: "task"; goal: string; done?: boolean }
   );
 
 export type Button = "left" | "right" | "middle";

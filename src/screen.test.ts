@@ -107,6 +107,14 @@ describe("screen", () => {
     expect(await s.screen.after(instant)).toBe(1);
   });
 
+  it("afterFrame gives the capture's hash with its number; blocked gives neither", async () => {
+    const s = setup();
+    s.hash(hash(90, 20));
+    expect(await s.screen.afterFrame(instant)).toEqual({ n: 0, hash: hash(90, 20) });
+    s.block(true);
+    expect(await s.screen.afterFrame(instant)).toEqual({ n: null, hash: null });
+  });
+
   it("nothing is captured or written while blocked", async () => {
     const s = setup();
     s.block(true);

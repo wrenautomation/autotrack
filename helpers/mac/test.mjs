@@ -1,4 +1,5 @@
-// Mac probe test: spawns ./probe, sends each op, checks the JSON shape, measures `at` latency.
+// Mac probe test: spawns ./probe, sends each op, checks the JSON shape, measures `at` latency;
+// then tree caps, a dialog in front, and pushed clipboard events (plain and concealed).
 // Null elements are accepted only when Accessibility isn't granted (reported, never worked around).
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -9,16 +10,18 @@ const child = spawn(join(dirname(fileURLToPath(import.meta.url)), "probe"), {
   stdio: ["pipe", "pipe", "inherit"],
 });
 const pending = new Map();
+let onEvent = null; // lines the probe pushes by itself
 createInterface({ input: child.stdout }).on("line", (line) => {
   const m = JSON.parse(line);
+  if (m.id === undefined && m.event) return onEvent?.(m);
   pending.get(m.id)?.(m);
   pending.delete(m.id);
 });
 let nextId = 1;
-const ask = (req) =>
+const ask = (req, ms = 2000) =>
   new Promise((resolve, reject) => {
     const id = nextId++;
-    const timer = setTimeout(() => reject(new Error(`no answer to ${JSON.stringify(req)}`)), 2000);
+    const timer = setTimeout(() => reject(new Error(`no answer to ${JSON.stringify(req)}`)), ms);
     pending.set(id, (m) => {
       clearTimeout(timer);
       resolve(m);
@@ -153,6 +156,17 @@ check(Number(p(0.95)) < 50, `p95 ${p(0.95)} ms is not under 50 ms`);
     const answers = [first ?? last];
     for (const c of f.fields.slice(1)) answers.push(await atField(c));
     answers.push(await ask({ op: "focused" }));
+    // The fixture's own tree, when it is in front (a system prompt can hold the front on CI).
+    const fr = await ask({ op: "front" });
+    if (fr.app?.pid === f.pid) {
+      const tree = await ask({ op: "tree", max: 1500, depth: 25, budgetMs: 750 }, 3000);
+      answers.push(tree);
+      check(
+        tree.nodes.filter((n) => n.role === "textfield").length === 3 &&
+          tree.nodes.some((n) => n.role === "textfield" && n.name === "Email"),
+        "the fixture's tree has its three fields, one named Email",
+      );
+    } else console.log(`value fields: front is ${fr.app?.id}, tree check skipped`);
     console.log("value fields", JSON.stringify(answers.map((a) => a.element)));
     check(!JSON.stringify(answers).includes(f.typed), "a typed value came back in an answer");
     if (perm.accessibility && !first) {
@@ -180,6 +194,112 @@ check(Number(p(0.95)) < 50, `p95 ${p(0.95)} ms is not under 50 ms`);
   app.kill();
   await exited;
   rmSync(dir, { recursive: true, force: true });
+}
+
+// tree: the front window's visible nodes, never a value key, within the caps the op was given.
+const NODE_KEYS = new Set(["role", "name", "id", "x", "y", "width", "height", "depth", "secure"]);
+const isNode = (n) =>
+  typeof n.role === "string" &&
+  typeof n.name === "string" &&
+  n.name.length <= 200 &&
+  Number.isInteger(n.depth) &&
+  n.depth >= 0 &&
+  ["x", "y", "width", "height"].every((k) => isNum(n[k])) &&
+  Object.keys(n).every((k) => NODE_KEYS.has(k));
+{
+  const t0 = Date.now();
+  const tree = await ask({ op: "tree", max: 300, depth: 10, budgetMs: 750 }, 3000);
+  const kb = Buffer.byteLength(JSON.stringify({ nodes: tree.nodes })) / 1024;
+  console.log(
+    `tree: ${tree.nodes?.length} nodes, ${kb.toFixed(1)} KB, ${tree.ms} ms in the helper, ${Date.now() - t0} ms round trip, truncated ${tree.truncated}`,
+  );
+  check(
+    Array.isArray(tree.nodes) && typeof tree.truncated === "boolean" && isNum(tree.ms),
+    "tree shape",
+  );
+  check(tree.nodes.length <= 300, "tree over its node cap");
+  check(
+    tree.nodes.every((n) => isNode(n) && n.depth < 10),
+    "tree node shape or depth cap",
+  );
+  if (perm.accessibility) check(tree.nodes.length > 0, "tree of the front window is empty");
+}
+
+// A dialog in front: `front` says so, with its title, text and buttons; the tree has them too.
+{
+  const dlg = spawn(
+    "osascript",
+    [
+      "-e",
+      "activate",
+      "-e",
+      'display dialog "Delete the draft?" with title "Probe test" buttons {"Keep", "Delete"} giving up after 20',
+    ],
+    { stdio: "ignore" },
+  );
+  let fr = null;
+  for (let i = 0; i < 50 && !fr?.dialog; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    fr = await ask({ op: "front" });
+  }
+  console.log("dialog front", JSON.stringify(fr));
+  if (perm.accessibility) {
+    check(
+      fr?.dialog?.title === "Probe test" &&
+        fr.dialog.text === "Delete the draft?" &&
+        JSON.stringify([...fr.dialog.buttons].sort()) === '["Delete","Keep"]',
+      "front.dialog has the dialog's title, text and buttons",
+    );
+    await new Promise((r) => setTimeout(r, 300)); // a window just shown can miss the 40 ms AX timeout
+    const again = await ask({ op: "front" });
+    check(isNum(again.windows) && again.windows >= 1, "front.windows counts the app's windows");
+    const tree = await ask({ op: "tree", max: 1500, depth: 25, budgetMs: 750 }, 3000);
+    check(
+      tree.nodes?.some((n) => n.role === "button" && n.name === "Delete"),
+      "the dialog's tree has its Delete button",
+    );
+  }
+  dlg.kill();
+  const after = await ask({ op: "front" });
+  check(
+    after.dialog === null || after.dialog === undefined || after.app?.name !== "osascript",
+    "front.dialog stays after the dialog closed",
+  );
+}
+
+// Clipboard: after `watch`, a copy pushes {event:"clipboard"} with its text; a copy marked
+// concealed (what password managers do) pushes no text. The clipboard's text is put back after.
+{
+  const { execFileSync } = await import("node:child_process");
+  const saved = execFileSync("pbpaste", { encoding: "utf8" });
+  const pushed = [];
+  onEvent = (m) => pushed.push(m);
+  check((await ask({ op: "watch", clipboard: true })).ok === true, "watch answers ok");
+  await new Promise((r) => setTimeout(r, 400));
+  execFileSync("pbcopy", { input: "probe clip 81" });
+  await new Promise((r) => setTimeout(r, 700));
+  execFileSync("osascript", [
+    "-l",
+    "JavaScript",
+    "-e",
+    "ObjC.import('AppKit'); const pb = $.NSPasteboard.generalPasteboard; pb.clearContents; pb.setStringForType('hunter2-concealed', 'public.utf8-plain-text'); pb.setStringForType('', 'org.nspasteboard.ConcealedType');",
+  ]);
+  await new Promise((r) => setTimeout(r, 700));
+  execFileSync("pbcopy", { input: saved });
+  console.log("clipboard events", JSON.stringify(pushed));
+  const plain = pushed.find((m) => m.text === "probe clip 81");
+  check(
+    plain &&
+      plain.event === "clipboard" &&
+      plain.length === 13 &&
+      plain.concealed === false &&
+      Array.isArray(plain.types),
+    "a copy pushes a clipboard event with its text and length",
+  );
+  const hidden = pushed.find((m) => m.concealed === true);
+  check(hidden && !("text" in hidden) && hidden.length === 17, "a concealed copy pushes no text");
+  check(!JSON.stringify(pushed).includes("hunter2"), "concealed text came back");
+  onEvent = null;
 }
 
 // Optional: AUTOTRACK_TEST_CHROME=1 opens an isolated Chrome on fixtures/web-button.html and waits for the

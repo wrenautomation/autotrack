@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { Element } from "./events.ts";
-import { blocked, holdForFocus, makeGate, redactSecrets, textOf } from "./privacy.ts";
+import {
+  blocked,
+  CLIPBOARD_TEXT_MAX,
+  clipboardText,
+  holdForFocus,
+  makeGate,
+  redactSecrets,
+  textOf,
+} from "./privacy.ts";
 
 const el = (secure: boolean): Element => ({
   role: "textfield",
@@ -22,6 +30,36 @@ describe("password fields", () => {
   });
   it("writes a run nobody could vouch for (no probe answer) redacted", () => {
     expect(textOf("hunter2", null)).toEqual({ text: "", redacted: true });
+  });
+});
+
+describe("clipboard text", () => {
+  const plain = { element: el(false) };
+  it("writes copied text redacted and capped", () => {
+    expect(clipboardText({ text: "hi", length: 2, concealed: false }, plain)).toEqual({
+      text: "hi",
+      redacted: false,
+    });
+    const key = clipboardText(
+      { text: `key sk-${"a1".repeat(15)}`, length: 37, concealed: false },
+      plain,
+    );
+    expect(key.redacted).toBe(true);
+    expect(key.text).toBe("key <redacted>");
+    const long = clipboardText({ text: "ab ".repeat(2000), length: 6000, concealed: false }, plain);
+    expect(long.text?.length).toBe(CLIPBOARD_TEXT_MAX);
+  });
+  it("never writes text from a password field, a concealed copy or secure input", () => {
+    const pw = { text: "hunter2", length: 7, concealed: false };
+    expect(clipboardText(pw, { element: el(true) })).toEqual({ redacted: true });
+    expect(clipboardText({ ...pw, secure: true }, plain)).toEqual({ redacted: true });
+    expect(clipboardText({ length: 7, concealed: true }, plain)).toEqual({ redacted: true });
+  });
+  it("no focus answer: text is withheld; nothing copied is not redacted", () => {
+    expect(clipboardText({ text: "hi", length: 2, concealed: false }, null)).toEqual({
+      redacted: true,
+    });
+    expect(clipboardText({ length: 0, concealed: false }, plain)).toEqual({ redacted: false });
   });
 });
 

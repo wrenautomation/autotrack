@@ -144,6 +144,11 @@ if frontName() != "TextEdit" {
 type("hello")
 key(returnKey)
 pause(1500) // the text run ends at Return; let frames settle
+// A copy while TextEdit's text has focus: the recorder writes it as a clipboard event.
+NSPasteboard.general.clearContents()
+NSPasteboard.general.setString("autotrack e2e clip 42", forType: .string)
+log("copied")
+pause(1000)
 
 var form: [String: Any]?
 for _ in 0..<40 {

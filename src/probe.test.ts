@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Probe, type ProbeChild } from "./probe.ts";
+import { clipboardOf, Probe, type ProbeChild, TREE_NODES } from "./probe.ts";
 
 /** A fake helper: records requests; the test answers when and how it likes. */
 class FakeChild extends EventEmitter implements ProbeChild {
@@ -121,6 +121,55 @@ describe("probe client", () => {
     expect(await q).toEqual({ id, app: null, window: null });
     probe.close();
     expect(child().killed).toBe(true);
+  });
+
+  it("a tree asks with its caps and waits seconds, not 50 ms", async () => {
+    const { probe, child } = setup();
+    const p = probe.tree();
+    await new Promise((r) => setTimeout(r, 120));
+    expect(child().requests[0]).toMatchObject({ op: "tree", max: TREE_NODES, depth: 25 });
+    child().answer({ id: 1, nodes: [], truncated: false, ms: 9 });
+    expect(await p).toMatchObject({ nodes: [], ms: 9 });
+    probe.close();
+  });
+
+  it("pushed lines go to onEvent; a watch is asked for again after a restart", async () => {
+    const { probe, children, child } = setup({ timeoutMs: 1000 });
+    const got: unknown[] = [];
+    probe.watchClipboard((c) => got.push(c));
+    await tick();
+    expect(child().requests).toEqual([{ id: 1, op: "watch", clipboard: true }]);
+    child().answer({
+      event: "clipboard",
+      types: ["public.utf8-plain-text"],
+      length: 2,
+      text: "hi",
+    });
+    child().answer({ event: "other" });
+    await tick();
+    expect(got).toEqual([
+      { types: ["public.utf8-plain-text"], length: 2, text: "hi", concealed: false },
+    ]);
+    children[0]?.emit("exit");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(children.length).toBe(2);
+    await tick();
+    expect(child().requests[0]).toMatchObject({ op: "watch", clipboard: true });
+    probe.close();
+  });
+
+  it("clipboardOf keeps only well-formed fields", () => {
+    expect(clipboardOf({ types: ["a", 3], length: -1, text: 5, concealed: "yes" })).toEqual({
+      types: ["a"],
+      length: 0,
+      concealed: false,
+    });
+    expect(clipboardOf({ types: [], length: 4, concealed: true, secure: true })).toEqual({
+      types: [],
+      length: 4,
+      concealed: true,
+      secure: true,
+    });
   });
 
   it("with no helper, every call is null at once", async () => {

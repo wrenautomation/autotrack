@@ -1,9 +1,12 @@
 /**
  * The recorder: hook → folder → context (probe, frames) → privacy → journal, plus the timers
  * (fold ticks, frame ring, front-app poll, idle frames, segment close, ship) and pause state.
+ * Signal rides along: each act's outcome (`out`) and latest tree, accessibility trees on focus
+ * and after a screen change, dialogs, clipboard changes, and the task marker's prompt.
  * Every dependency comes in, so tests drive it with fakes and a hand-run clock.
  */
 
+import { createHash } from "node:crypto";
 import type { Config } from "./config.ts";
 import { type Coords, identity, logicalElement, logicalWindow } from "./coords.ts";
 import {
@@ -12,15 +15,32 @@ import {
   type Event,
   type Folded,
   Folder,
+  type Out,
   type PauseReason,
   type Raw,
   type SessionMeta,
   type WindowInfo,
 } from "./events.ts";
 import { Journal } from "./journal.ts";
-import { type Gate, blocked as gateOf, holdForFocus, makeGate, textOf } from "./privacy.ts";
-import type { AtAnswer, FocusedAnswer, FrontAnswer, PermAnswer } from "./probe.ts";
-import { type Capturer, type Frame, Screen } from "./screen.ts";
+import {
+  clipboardText,
+  type Gate,
+  blocked as gateOf,
+  holdForFocus,
+  makeGate,
+  redactSecrets,
+  textOf,
+} from "./privacy.ts";
+import type {
+  AtAnswer,
+  ClipboardChange,
+  DialogInfo,
+  FocusedAnswer,
+  FrontAnswer,
+  PermAnswer,
+  TreeAnswer,
+} from "./probe.ts";
+import { type Capturer, differs, type Frame, Screen } from "./screen.ts";
 import type { Shipper } from "./ship.ts";
 
 export const FOLD_TICK_MS = 100;
@@ -31,6 +51,14 @@ export const SEGMENT_TICK_MS = 30_000;
 export const SHIP_MS = 5 * 60_000;
 /** A point act whose element did not answer in 50 ms asks once more with this long. */
 export const AT_RETRY_MS = 1000;
+/** Trees: at most one a second. */
+export const TREE_MIN_MS = 1000;
+/** An incoming `tree` string over this many bytes is stored as `trees/<n>.txt`. */
+export const TREE_INLINE_BYTES = 2048;
+/** How long a clipboard change waits for the focused element (secure or not). */
+export const CLIPBOARD_FOCUS_MS = 500;
+export const TASK_QUESTION = "What are you doing?";
+export const TASK_GOAL_MAX = 500;
 
 /** The probe surface the recorder uses (the real `Probe`, or a fake). */
 export interface ProbeLike {
@@ -38,8 +66,10 @@ export interface ProbeLike {
   readonly running: boolean;
   at(x: number, y: number, timeoutMs?: number): Promise<AtAnswer | null>;
   front(): Promise<FrontAnswer | null>;
-  focused(): Promise<FocusedAnswer | null>;
+  focused(timeoutMs?: number): Promise<FocusedAnswer | null>;
   perm(timeoutMs?: number): Promise<PermAnswer | null>;
+  tree?(): Promise<TreeAnswer | null>;
+  watchClipboard?(fn: (c: ClipboardChange) => void): void;
   close(): void;
 }
 
@@ -56,6 +86,8 @@ export interface RecorderDeps {
   /** Front app when the probe has no answer (helper missing). */
   frontFallback?: () => FrontAnswer | null;
   notify?: (msg: string) => void;
+  /** The task marker's one-line prompt: the answer, or null when cancelled. */
+  ask?: (question: string) => Promise<string | null>;
   shipper?: Shipper;
   /** Monotonic ms; epoch ms. */
   clock?: { now(): number; epoch(): number };
@@ -71,6 +103,8 @@ interface Ctx {
   target: Promise<AtAnswer | FocusedAnswer | null>;
   /** The act's point in the probe's coordinates, for asking again. */
   at?: { x: number; y: number };
+  /** The latest tree written when the act began. */
+  tree: number | null;
 }
 
 export interface Status {
@@ -80,6 +114,7 @@ export interface Status {
   segment: string;
   events: number;
   frames: number;
+  trees: number;
   paused: PauseReason | null;
   probe: "running" | "down" | "missing";
   startedAt: string;
@@ -88,14 +123,44 @@ export interface Status {
   rssMb: number;
 }
 
-const HOTKEY = (r: Raw) =>
+/** Ctrl+Alt+Shift+<key>. */
+const hotkey = (r: Raw, key: string) =>
   r.type === "keydown" &&
-  r.key === "p" &&
+  r.key === key &&
   r.mods.length === 3 &&
   ["ctrl", "alt", "shift"].every((m) => r.mods.includes(m as "ctrl"));
 
 const sameFront = (a: FrontAnswer | null, b: FrontAnswer | null) =>
   a?.app?.pid === b?.app?.pid && a?.app?.id === b?.app?.id && a?.window?.title === b?.window?.title;
+
+const dialogKey = (d: DialogInfo | null | undefined) =>
+  d ? JSON.stringify([d.title, d.text, d.buttons]) : null;
+
+/**
+ * What an act did, from the front app before it and after its after-frame, and the two frame
+ * hashes. Unknown (no answer, no frame) reads as false.
+ */
+export function outOf(
+  a: FrontAnswer | null,
+  b: FrontAnswer | null,
+  hashBefore: string | null,
+  hashAfter: string | null,
+): Out {
+  return {
+    screen: hashBefore !== null && hashAfter !== null && differs(hashBefore, hashAfter),
+    focus: !!a?.app && !!b?.app && !sameFront(a, b),
+    dialog: !!b?.dialog && dialogKey(b.dialog) !== dialogKey(a?.dialog),
+    window:
+      !!a?.app &&
+      !!b?.app &&
+      a.app.pid === b.app.pid &&
+      typeof a.windows === "number" &&
+      typeof b.windows === "number" &&
+      a.windows !== b.windows,
+  };
+}
+
+const clip = (s: string, n: number) => redactSecrets(s).text.slice(0, n);
 
 export class Recorder {
   readonly journal: Journal;
@@ -110,6 +175,13 @@ export class Recorder {
   private gated: "excluded" | "locked" | null = null;
   private written: PauseReason | null = null; // the pause reason last written
   private lastFront: FrontAnswer | null = null;
+  private lastDialog: string | null = null;
+  private lastTree: number | null = null;
+  private lastTreeHash: string | null = null;
+  private treeWanted = false;
+  private treeBusy = false;
+  private treeAt = Number.NEGATIVE_INFINITY;
+  private prompting = false;
   private lastRaw = Number.NEGATIVE_INFINITY;
   private chain: Promise<void> = Promise.resolve();
   private deferred: { t: number; fn: () => void }[] = [];
@@ -152,6 +224,7 @@ export class Recorder {
 
   start(): void {
     this.stopHook = this.d.hook((r) => this.onRaw(r));
+    this.d.probe.watchClipboard?.((c) => this.onClipboard(c));
     if (this.d.timers !== false) {
       const every = (ms: number, fn: () => unknown) => {
         const h = setInterval(() => {
@@ -181,7 +254,7 @@ export class Recorder {
     this.stopHook?.();
     this.folder.flush();
     this.release(Number.POSITIVE_INFINITY);
-    await this.chain;
+    await this.settled();
     this.journal.close();
     this.d.probe.close();
     this.d.capturer.close?.();
@@ -211,6 +284,7 @@ export class Recorder {
       segment: this.journal.segment,
       events: this.journal.events,
       frames: this.journal.frames,
+      trees: this.journal.trees,
       paused: this.paused,
       probe: !this.d.probe.available ? "missing" : this.d.probe.running ? "running" : "down",
       startedAt: new Date(this.epoch0).toISOString(),
@@ -222,7 +296,8 @@ export class Recorder {
 
   /**
    * A `web` or `app` event from the browser extension (via its native host), written as is:
-   * t / ts filled in when missing, nothing while paused or an excluded app is in front.
+   * t / ts filled in when missing, nothing while paused or an excluded app is in front. A `tree`
+   * string over 2 KB (a `snapshot`) is stored as `trees/<n>.txt` and named by `treeFile: n`.
    */
   external(event: unknown): { written: boolean; reason?: string } {
     if (!event || typeof event !== "object" || Array.isArray(event))
@@ -236,22 +311,39 @@ export class Recorder {
     const t0 = num(e.t);
     const t = t0 ?? (ts0 !== undefined ? Math.round(ts0 - this.epoch0) : this.t(this.clock.now()));
     const out = { ...e, t, ts: ts0 ?? this.ts(t) } as unknown as Event;
+    const tree = e.tree;
+    if (typeof tree === "string" && Buffer.byteLength(tree) > TREE_INLINE_BYTES) {
+      const { tree: _t, ...rest } = out as Event & { tree?: string };
+      this.enqueue(async () => {
+        this.journal.writeTree(tree, "txt", (n) => ({ ...rest, treeFile: n }) as Event);
+      });
+      return { written: true };
+    }
     this.enqueue(async () => this.write(out)); // after anything already queued, before a pause
     return { written: true };
   }
 
-  /** All writes so far are on disk. */
-  settled(): Promise<void> {
-    return this.chain;
+  /** All writes so far are on disk, including any a write queued while it ran. */
+  async settled(): Promise<void> {
+    let c: Promise<void> | null = null;
+    while (c !== this.chain) {
+      c = this.chain;
+      await c;
+    }
   }
 
   onRaw(r: Raw): void {
     if (this.stopped) return;
-    if (HOTKEY(r)) {
+    if (hotkey(r, "p")) {
       if (this.userPaused) this.resume();
       else this.pause("hotkey");
       return;
     }
+    if (hotkey(r, "t")) {
+      void this.task();
+      return;
+    }
+    if (this.prompting) return; // the answer typed into the prompt is not input
     this.lastRaw = this.clock.now();
     if (this.paused) return;
     this.screen.input(...(r.type === "keydown" ? [] : ([r.x, r.y] as const)));
@@ -261,12 +353,14 @@ export class Recorder {
   foldTick(): void {
     this.folder.tick(this.t(this.clock.now()));
     this.release(this.folder.pendingSince);
+    if (this.treeWanted)
+      this.treeTick().catch((e) => this.d.log?.(`tree: ${(e as Error).message}`));
   }
 
   /** The front app, polled while someone is active or an exclusion holds: pauses and focus. */
   async frontTick(): Promise<void> {
     const active = this.clock.now() - this.lastRaw < 5000;
-    if (this.userPaused || (!active && !this.gated)) return;
+    if (this.userPaused || this.prompting || (!active && !this.gated)) return;
     const front = await this.front();
     const t = this.t(this.clock.now());
     this.side(t, () =>
@@ -285,6 +379,42 @@ export class Recorder {
       if (frame !== null) this.write({ kind: "frame", frame, t, ts: this.ts(t) });
     });
     await n;
+  }
+
+  /**
+   * Capture the front window's tree when one is wanted (a focus change, an act that moved the
+   * screen), at most once a second, one at a time. Its event's t is when it was asked for; the
+   * same tree twice is written once.
+   */
+  async treeTick(): Promise<void> {
+    const probe = this.d.probe;
+    if (!this.treeWanted || this.treeBusy || this.stopped || !probe.tree) return;
+    if (this.paused) {
+      this.treeWanted = false;
+      return;
+    }
+    const now = this.clock.now();
+    if (now - this.treeAt < TREE_MIN_MS) return;
+    this.treeWanted = false;
+    this.treeBusy = true;
+    this.treeAt = now;
+    const t = this.t(now);
+    let f: FrontAnswer | null;
+    let a: TreeAnswer | null;
+    try {
+      [f, a] = await Promise.all([this.front(), probe.tree()]);
+    } finally {
+      this.treeBusy = false;
+    }
+    if (!a || !Array.isArray(a.nodes)) return;
+    const tree = a;
+    const front = f ?? this.lastFront;
+    this.side(t, () =>
+      this.enqueue(async () => {
+        if (this.paused || gateOf(this.gate, ...frontParts(front)) !== null) return;
+        this.writeTree(tree, front, t);
+      }),
+    );
   }
 
   async shipTick(): Promise<void> {
@@ -318,7 +448,13 @@ export class Recorder {
       at = c.toPhysical(b.x, b.y);
       target = this.d.probe.at(at.x, at.y);
     } else target = this.d.probe.focused();
-    return { before: this.screen.before(), front: this.front(), target, ...(at ? { at } : {}) };
+    return {
+      before: this.screen.before(),
+      front: this.front(),
+      target,
+      ...(at ? { at } : {}),
+      tree: this.lastTree,
+    };
   }
 
   private onAct(a: Folded<Ctx>): void {
@@ -335,7 +471,12 @@ export class Recorder {
     this.enqueue(async () => {
       const p = await prepared;
       if (p.front) this.applyFront(p.front, a.t);
-      if (p.event) this.write(p.event);
+      if (!p.event) return;
+      this.write(p.event);
+      if ((p.event as { out?: Out }).out?.screen) this.wantTree();
+      const later = p.later;
+      if (later)
+        this.side(later.t, () => this.enqueue(async () => this.applyFront(later.front, later.t)));
     });
   }
 
@@ -343,9 +484,11 @@ export class Recorder {
    * Resolve an act's context. `event` is null when it must not be recorded (an excluded app or
    * the lock screen was in front); `front` is still applied, in order, so the pause lands.
    */
-  private async prepare(
-    a: Folded<Ctx>,
-  ): Promise<{ event: Event | null; front: FrontAnswer | null }> {
+  private async prepare(a: Folded<Ctx>): Promise<{
+    event: Event | null;
+    front: FrontAnswer | null;
+    later?: { front: FrontAnswer; t: number } | null;
+  }> {
     const ctx = a.ctx as Ctx;
     const front = (await ctx.front) ?? this.lastFront; // no answer in 50 ms: the last one known
     if (gateOf(this.gate, ...frontParts(front)) !== null) return { event: null, front };
@@ -364,7 +507,11 @@ export class Recorder {
     }
     const beforeFrame = await ctx.before;
     const before = await this.screen.number(beforeFrame);
-    const after = await this.screen.after(this.d.sleep);
+    const shot = await this.screen.afterFrame(this.d.sleep);
+    const after = shot.n;
+    const laterFront = await this.front();
+    const later = laterFront?.app ? { front: laterFront, t: this.t(this.clock.now()) } : null;
+    const out = outOf(front, laterFront, beforeFrame?.shot.hash ?? null, shot.hash);
     const { end: _e, ctx: _c, ...act } = a;
     const element = logicalElement(c, target?.element);
     const app = front?.app ?? undefined;
@@ -381,8 +528,10 @@ export class Recorder {
       ...(element ? { element } : {}),
       ...(before !== null ? { before } : {}),
       ...(after !== null ? { after } : {}),
+      out,
+      ...(ctx.tree !== null ? { tree: ctx.tree } : {}),
     } as Event;
-    return { event, front };
+    return { event, front, later };
   }
 
   /**
@@ -392,19 +541,115 @@ export class Recorder {
   private applyFront(front: FrontAnswer, t: number): void {
     this.gated = gateOf(this.gate, ...frontParts(front));
     this.sync(t, true);
-    if (this.paused || sameFront(front, this.lastFront)) return;
-    const first = this.lastFront === null;
-    this.lastFront = front;
-    if (first) return;
-    const c = this.coords();
-    const window = logicalWindow(c, front.window);
+    if (this.paused) return;
+    if (!sameFront(front, this.lastFront)) {
+      const first = this.lastFront === null;
+      this.lastFront = front;
+      this.wantTree();
+      if (!first) this.write({ kind: "focus", t, ts: this.ts(t), ...this.base(front) });
+    }
+    this.applyDialog(front, t);
+  }
+
+  /** A dialog event when the front window became a dialog not written last (runs in the chain). */
+  private applyDialog(front: FrontAnswer, t: number): void {
+    const key = dialogKey(front.dialog);
+    if (key === this.lastDialog) return;
+    this.lastDialog = key;
+    const d = front.dialog;
+    if (!d) return;
     this.write({
-      kind: "focus",
+      kind: "dialog",
       t,
       ts: this.ts(t),
-      ...(front.app ? { app: front.app } : {}),
-      ...(window ? { window } : {}),
+      ...this.base(front),
+      title: clip(String(d.title ?? ""), 200),
+      text: clip(String(d.text ?? ""), 300),
+      buttons: (Array.isArray(d.buttons) ? d.buttons : [])
+        .slice(0, 10)
+        .map((b) => clip(String(b), 80)),
     });
+  }
+
+  /** `app` and `window` (logical points) for an event's Base. */
+  private base(front: FrontAnswer | null): Pick<Event, "app" | "window"> {
+    const window = logicalWindow(this.coords(), front?.window);
+    return { ...(front?.app ? { app: front.app } : {}), ...(window ? { window } : {}) };
+  }
+
+  private wantTree(): void {
+    if (this.d.probe.tree) this.treeWanted = true;
+  }
+
+  /**
+   * Runs in the chain: `trees/<n>.json` and its event, unless it is the tree written last. Names
+   * pass through secret redaction (a page can show a key as plain text).
+   */
+  private writeTree(a: TreeAnswer, front: FrontAnswer | null, t: number): void {
+    const c = this.coords();
+    const nodes = a.nodes.map((n) => ({
+      ...c.rect(n),
+      name: redactSecrets(String(n.name ?? "")).text,
+    }));
+    const hash = createHash("sha1").update(JSON.stringify(nodes)).digest("hex");
+    if (hash === this.lastTreeHash) return;
+    const body = JSON.stringify({ nodes, truncated: a.truncated === true, ms: a.ms });
+    const n = this.journal.writeTree(body, "json", (tree) => ({
+      kind: "tree",
+      tree,
+      t,
+      ts: this.ts(t),
+      ...this.base(front),
+    }));
+    if (n === null) return;
+    this.lastTreeHash = hash;
+    this.lastTree = n;
+  }
+
+  /** A clipboard change: its text only through `clipboardText`, nothing from an excluded app. */
+  private onClipboard(c: ClipboardChange): void {
+    if (this.stopped || this.paused) return;
+    const t = this.t(this.clock.now());
+    const front = this.front();
+    const focused =
+      c.concealed || c.secure ? Promise.resolve(null) : this.d.probe.focused(CLIPBOARD_FOCUS_MS);
+    this.side(t, () =>
+      this.enqueue(async () => {
+        const f = (await front) ?? this.lastFront;
+        const el = await focused;
+        if (this.paused || gateOf(this.gate, ...frontParts(f)) !== null) return;
+        this.write({
+          kind: "clipboard",
+          t,
+          ts: this.ts(t),
+          ...this.base(f),
+          types: c.types,
+          length: c.length,
+          ...clipboardText(c, el),
+        });
+      }),
+    );
+  }
+
+  /** The task marker: ask what the person is doing; an empty answer marks the task done. */
+  private async task(): Promise<void> {
+    if (this.prompting || this.paused || !this.d.ask) return;
+    this.prompting = true;
+    this.folder.flush();
+    const t = this.t(this.clock.now());
+    try {
+      const answer = await this.d.ask(TASK_QUESTION);
+      if (answer === null || this.stopped || this.paused) return;
+      const goal = clip(answer.replace(/\s+/g, " ").trim(), TASK_GOAL_MAX);
+      const e: Event = goal
+        ? { kind: "task", goal, t, ts: this.ts(t) }
+        : { kind: "task", goal: "", done: true, t, ts: this.ts(t) };
+      this.enqueue(async () => this.write(e));
+    } catch (err) {
+      this.d.log?.(`task: ${(err as Error).message}`);
+    } finally {
+      this.prompting = false;
+    }
   }
 
   /** Write pause / resume when the effective reason changed; `direct` when already in the chain. */
@@ -429,8 +674,8 @@ export class Recorder {
   }
 
   /**
-   * A write beside the acts (a front poll's focus): it waits while an act that began before it is
-   * still folding (a text run, a held button), so events stay in time order.
+   * A write beside the acts (a focus, tree or clipboard event): it waits while an act that began
+   * before it is still folding (a text run, a held button), so events stay in time order.
    */
   private side(t: number, fn: () => void): void {
     let i = this.deferred.length;

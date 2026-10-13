@@ -158,6 +158,9 @@ try {
     [Drive]::Type('hello')
     [Drive]::Key(0x0D) # Enter
     Start-Sleep -Milliseconds 1500
+    # A copy while Notepad's text has focus: the recorder writes it as a clipboard event.
+    Set-Clipboard -Value 'autotrack e2e clip 42'
+    Start-Sleep -Milliseconds 1000
 
     $formFile = Join-Path $work 'form.json'
     $form = Start-Process powershell -PassThru -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass',

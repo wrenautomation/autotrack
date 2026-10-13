@@ -42,6 +42,8 @@ nothing from autobrowse; autobrowse keeps a hand-synced copy of the session type
   <segment>/                          segment = 000, 001, … (5 minutes or 2,000 events each)
     events.jsonl                      one Event per line
     frames/<n>.jpg                    n = frame number in the session
+    trees/<n>.json | <n>.txt          n = tree number in the session (Signal: accessibility trees,
+                                        web snapshots over 2 KB)
     .done                             written last; ship only takes dirs with it
 ```
 
@@ -74,7 +76,7 @@ type Event = Base & (
   | { kind: "frame"; frame: number }                                // a screen change with no act (idle reading)
   | { kind: "pause"; reason: "hotkey"|"cli"|"excluded"|"locked" }
   | { kind: "resume" }
-);
+);                      // Signal adds kinds tree, dialog, clipboard, task and act fields out, tree
 ```
 
 Coordinates are global, in the OS's logical points; `displays[].scale` turns them into frame
@@ -131,6 +133,25 @@ stall in the hook. A click whose `at` missed is asked once more with `"wait":100
 waits that long, and the Mac helper raises its AX timeout to match (an app busy taking focus
 misses 40 ms). Windows ignores `wait`.
 
+Signal adds (see Signal below):
+
+```
+← front also answers "windows":3 (the front app's open windows) and
+  "dialog":{"title","text","buttons":[…]}|null (the front window is an alert, sheet or modal)
+→ {"id":5,"op":"tree","max":1500,"depth":25,"budgetMs":750}
+                                            ← {"id":5,"nodes":[{role,name,id?,x,y,width,height,depth,secure?}],"truncated":false,"ms":106}
+→ {"id":6,"op":"watch","clipboard":true}    ← {"id":6,"ok":true}
+← {"event":"clipboard","types":[…],"length":13,"text":"…"?,"concealed":false,"secure":false}
+```
+
+- `tree` walks on the helper's own worker (Mac a serial queue, Windows a background thread in the
+  embedded C#), so `at`/`front` keep answering while it runs; its answer comes when done (the
+  client waits 3 s). One walk at a time.
+- Clipboard is polled in the helper, never in Node, and pushed: a line with `event` and no `id`.
+  Mac checks `NSPasteboard.changeCount` every 250 ms; Windows `GetClipboardSequenceNumber` every
+  250 ms on an STA thread. A change sends one line; nothing changes, nothing is sent. The client
+  asks for `watch` again after every helper restart.
+
 ## Shots protocol
 
 A second long-lived helper, the same binary or script started with `--shots`, so a capture never
@@ -166,7 +187,8 @@ delays a probe answer. Node keeps slot numbers and hashes, never pixels.
 - Bucket `autobrowse-prod-track-<acct>` (`deploy/terraform/track.tf`, like `shots.tf`): private,
   AES256, versioning off; lifecycle → Glacier Instant Retrieval after 30 days (about $4 per TB a
   month, read in milliseconds when a training run wants it).
-- Key: `<device>/<session>/<segment>/events.jsonl.gz`, `…/frames/<n>.jpg`, `<device>/<session>/session.json`.
+- Key: `<device>/<session>/<segment>/events.jsonl.gz`, `…/frames/<n>.jpg`,
+  `…/trees/<n>.json.gz` (or `<n>.txt.gz` for a web snapshot), `<device>/<session>/session.json`.
 - `autobrowse autotrack enroll <device>` (William's Mac, his AWS user): IAM user `track-<device>` with
   only `s3:PutObject` on `<bucket>/<device>/*`; makes an access key; prints the one-line install
   command carrying `<bucket>`, `<device>` and the key. The key can write its own prefix and nothing
@@ -349,6 +371,34 @@ error). That's the exact "why" and "what came of it" for every act inside Wren.
 - Task marker over always-on narration: no microphone on someone else's laptop; the marker is
   optional and one line.
 - Trees on change, not per act: a tree is 5–50 KB; per act it would outweigh the frames.
+
+### As built (recorder, 2026-10-13)
+
+Where the build is more exact than the bullets above:
+
+- `out` and `tree` are optional on act events, so sessions recorded before Signal still parse. An
+  unknown side reads false: no after-frame, `screen` false; no front answer, `focus` false;
+  `window` only compares two counts from the same app.
+- Tree nodes: `id` only when the element has one; `secure: true` only on a password field. Names
+  pass the same secret redaction as text. The file is `{nodes, truncated, ms}` (`truncated`: a cap
+  cut the walk). Mac skips nameless groups and layout containers and takes a static text's name
+  from its text; Windows walks UIA's `ControlViewWalker` and skips nameless panes, groups, custom,
+  text, image and data items. Text fields are leaves (their children are the text).
+- Dialogs: Mac also counts a window with `AXModal`; for a sheet, `window` is its parent window.
+  Windows: class `#32770` or `WindowPattern.IsModal`. Written once per distinct dialog.
+- Clipboard: `length` counts UTF-16 code units of the text (0 when none). `text` is withheld and
+  `redacted: true` written when the copy was concealed (Mac `org.nspasteboard.ConcealedType` or
+  `TransientType`; Windows `ExcludeClipboardContentFromMonitorProcessing` or `Clipboard Viewer
+  Ignore`), made under secure input, made while a password field had focus, or when the focused
+  element did not answer in 500 ms.
+- Task: the answer is trimmed, whitespace collapsed, at most 500 characters. Keys typed into the
+  prompt are not recorded. Windows shows a small WinForms box rather than an InputBox: it can take
+  the foreground (an Alt tap lifts the background rule) and needs no VisualBasic assembly. The Mac
+  dialog comes from `osascript`, which on some setups opens behind the front app.
+- Order: focus, tree and clipboard events wait while an act that began before them is still
+  folding (a text run, a held button), so `t` never goes backwards in `events.jsonl`.
+- The control socket takes lines up to 256 KB (was 64 KB) so a 30k-character snapshot, escaped,
+  fits.
 
 ## Decision log
 

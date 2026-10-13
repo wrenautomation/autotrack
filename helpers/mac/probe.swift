@@ -1,5 +1,7 @@
 // autotrack probe (Mac): long-lived helper. One JSON request per line on stdin, one answer per
-// line on stdout. Ops: at, front, focused, perm. See designs/2026-10-13-autotrack.md "Probe protocol".
+// line on stdout. Ops: at, front, focused, perm, tree, watch. See designs/2026-10-13-autotrack.md
+// "Probe protocol". `tree` is answered from a worker queue (seconds, not 50 ms) and `watch` makes the
+// helper push `{"event":"clipboard",…}` lines on a 4 Hz changeCount poll; one lock keeps lines whole.
 // `probe --shots` is the same binary as a second process that only takes screen frames (ops grab,
 // save, displays; see "Shots protocol"), so a capture never delays a probe answer.
 // Never returns an element's value, nor a name that shows it (a text field named by its content).
@@ -32,7 +34,8 @@ let ancestorAttrs: [String] = [
 ]
 let maxAncestors = 6
 let walkBudgetMs = 30.0  // ancestor walking stops past this, so a slow app can't blow the 50 ms answer
-let windowAttrs: [String] = [kAXTitleAttribute, kAXPositionAttribute, kAXSizeAttribute]
+let windowAttrs: [String] = [kAXTitleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXRoleAttribute,
+                              kAXSubroleAttribute, "AXModal", kAXParentAttribute]
 
 func attrs(_ el: AXUIElement, _ names: [String]) -> [String: CFTypeRef]? {
     var out: CFArray?
@@ -234,20 +237,68 @@ func opFront() -> [String: Any] {
         "pid": Int(app.processIdentifier),
     ]
     var window: Any = NSNull()
+    var dialog: Any = NSNull()
     let ax = AXUIElementCreateApplication(app.processIdentifier)
     AXUIElementSetMessagingTimeout(ax, axTimeout)
+    var count: CFIndex = 0
+    let windows = AXUIElementGetAttributeValueCount(ax, kAXWindowsAttribute as CFString, &count) == .success ? count : -1
     var w: CFTypeRef?
     if AXUIElementCopyAttributeValue(ax, kAXFocusedWindowAttribute as CFString, &w) == .success,
-       let we = w, CFGetTypeID(we) == AXUIElementGetTypeID() {
-        let wel = we as! AXUIElement
+       var wel = axElement(w) {
         AXUIElementSetMessagingTimeout(wel, axTimeout)
-        if let a = attrs(wel, windowAttrs) {
+        if var a = attrs(wel, windowAttrs) {
+            let role = str(a[kAXRoleAttribute]), sub = str(a[kAXSubroleAttribute])
+            let modal = (a["AXModal"] as? Bool) == true
+            if role == "AXSheet" || sub == "AXDialog" || sub == "AXSystemDialog" || modal {
+                dialog = dialogJSON(wel, title: str(a[kAXTitleAttribute]))
+                // A sheet is part of its window: `window` stays the window it hangs from.
+                if role == "AXSheet", let parent = axElement(a[kAXParentAttribute]) {
+                    AXUIElementSetMessagingTimeout(parent, axTimeout)
+                    if let pa = attrs(parent, windowAttrs) { wel = parent; a = pa }
+                }
+            }
             let p = point(a[kAXPositionAttribute]) ?? .zero
             let s = size(a[kAXSizeAttribute]) ?? .zero
             window = ["title": str(a[kAXTitleAttribute]), "x": r(p.x), "y": r(p.y), "width": r(s.width), "height": r(s.height)] as [String: Any]
         }
     }
-    return ["app": appJSON, "window": window]
+    var out: [String: Any] = ["app": appJSON, "window": window, "dialog": dialog]
+    if windows >= 0 { out["windows"] = windows }
+    return out
+}
+
+// A dialog's words: its static texts (the first is the title when the window has none) and its
+// button titles, from at most 80 elements 4 levels down. Labels, never a field's value.
+func dialogJSON(_ win: AXUIElement, title: String) -> [String: Any] {
+    var texts: [String] = []
+    var buttons: [String] = []
+    var seen = 0
+    func walk(_ el: AXUIElement, _ depth: Int) {
+        guard depth < 4, seen < 80 else { return }
+        var v: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &v) == .success,
+              let kids = v as? [AXUIElement] else { return }
+        for k in kids where seen < 80 {
+            seen += 1
+            AXUIElementSetMessagingTimeout(k, axTimeout)
+            guard let a = attrs(k, [kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute]) else { continue }
+            switch str(a[kAXRoleAttribute]) {
+            case "AXStaticText":
+                let t = firstNonEmpty(a, [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute])
+                if !t.isEmpty { texts.append(t) }
+            case "AXButton":
+                let t = firstNonEmpty(a, [kAXTitleAttribute, kAXDescriptionAttribute])
+                if !t.isEmpty { buttons.append(t) }
+            case "AXTextField", "AXTextArea", "AXComboBox": continue
+            default: walk(k, depth + 1)
+            }
+        }
+    }
+    walk(win, 0)
+    var t = title
+    if t.isEmpty, !texts.isEmpty { t = texts.removeFirst() }
+    texts.removeAll { $0 == t }
+    return ["title": t, "text": texts.joined(separator: "\n"), "buttons": buttons]
 }
 
 func opPerm() -> [String: Any] {
@@ -260,9 +311,150 @@ func opPerm() -> [String: Any] {
 
 func num(_ v: Any?) -> Double? { (v as? NSNumber)?.doubleValue }
 
-func handle(_ req: [String: Any]) -> [String: Any] {
+// MARK: - Tree (op `tree`, on its own queue)
+
+let treeQueue = DispatchQueue(label: "autotrack.tree")
+let treeAttrs: [String] = [
+    kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel",
+    kAXValueAttribute, kAXPositionAttribute, kAXSizeAttribute, "AXIdentifier", "AXDOMIdentifier",
+    kAXChildrenAttribute,
+]
+// Unnamed, id-less containers and labels add depth and nothing else: not emitted, their children
+// take their place.
+let passThrough: Set<String> = ["AXGroup", "AXUnknown", "AXSplitGroup", "AXLayoutArea", "AXLayoutItem",
+                                "AXScrollArea", "AXList", "AXOutline", "AXTable", "AXRow", "AXCell",
+                                "AXColumn", "AXStaticText", "AXImage"]
+// Areas that clip what is inside them to their own rect.
+let clipRoles: Set<String> = ["AXScrollArea", "AXWebArea"]
+let treeNameMax = 200
+
+// The front app's focused window, walked depth first: visible nodes only (inside the window and
+// every scroll or web area around them), at most `max` nodes and `depth` levels of emitted nodes,
+// stopping at `budgetMs`. Text-entry fields are leaves (their children are the typed text); their
+// names follow `safeName`. A secure field is marked `secure: true`.
+func opTree(max: Int, depth maxDepth: Int, budgetMs: Double) -> [String: Any] {
+    let t0 = DispatchTime.now()
+    var nodes: [[String: Any]] = []
+    var truncated = false
+    var app: pid_t = 0
+    var v: CFTypeRef?
+    if AXUIElementCopyAttributeValue(systemWide, kAXFocusedApplicationAttribute as CFString, &v) == .success,
+       let e = axElement(v) { AXUIElementGetPid(e, &app) }
+    if app == 0, let f = NSWorkspace.shared.frontmostApplication { app = f.processIdentifier }
+    let ax = AXUIElementCreateApplication(app)
+    AXUIElementSetMessagingTimeout(ax, 0.1)
+    var w: CFTypeRef?
+    guard app != 0, AXUIElementCopyAttributeValue(ax, kAXFocusedWindowAttribute as CFString, &w) == .success,
+          let win = axElement(w) else { return ["nodes": nodes, "truncated": false, "ms": Int(msSince(t0))] }
+
+    func walk(_ el: AXUIElement, _ depth: Int, _ raw: Int, _ clip: CGRect) {
+        if truncated { return }
+        if nodes.count >= max || msSince(t0) > budgetMs || raw > 60 { truncated = true; return }
+        AXUIElementSetMessagingTimeout(el, 0.1)
+        guard let a = attrs(el, treeAttrs) else { return }
+        let role = str(a[kAXRoleAttribute])
+        if role.isEmpty { return }
+        let p = point(a[kAXPositionAttribute]), sz = size(a[kAXSizeAttribute])
+        var rect = CGRect.null
+        if let p = p, let sz = sz { rect = CGRect(origin: p, size: sz) }
+        let sized = !rect.isNull && rect.width > 0 && rect.height > 0
+        if sized && !rect.intersects(clip) { return }  // scrolled away or off the window
+        let sub = str(a[kAXSubroleAttribute])
+        var name = firstNonEmpty(a, [kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel"])
+        if name.isEmpty && role == "AXStaticText" { name = str(a[kAXValueAttribute]) }  // a label's text
+        name = safeName(el, role: role, name)
+        if name.count > treeNameMax { name = String(name.prefix(treeNameMax)) }
+        let id = firstNonEmpty(a, ["AXIdentifier", "AXDOMIdentifier"])
+        let skip = !sized || (name.isEmpty && id.isEmpty && passThrough.contains(role))
+        var next = depth
+        if !skip {
+            if depth >= maxDepth { truncated = true; return }
+            let vis = rect.intersection(clip)
+            var n: [String: Any] = [
+                "role": normRole(role), "name": name, "depth": depth,
+                "x": r(vis.minX), "y": r(vis.minY), "width": r(vis.width), "height": r(vis.height),
+            ]
+            if !id.isEmpty { n["id"] = id }
+            if sub == "AXSecureTextField" { n["secure"] = true }
+            nodes.append(n)
+            next = depth + 1
+        }
+        if textRoles.contains(role) { return }
+        let inner = sized && clipRoles.contains(role) ? clip.intersection(rect) : clip
+        guard let kids = a[kAXChildrenAttribute] as? [AXUIElement] else { return }
+        for k in kids {
+            walk(k, next, raw + 1, inner)
+            if truncated { return }
+        }
+    }
+
+    var clip = CGRect.infinite
+    if let a = attrs(win, [kAXPositionAttribute, kAXSizeAttribute]),
+       let p = point(a[kAXPositionAttribute]), let sz = size(a[kAXSizeAttribute]) {
+        clip = CGRect(origin: p, size: sz)
+    }
+    walk(win, 0, 0, clip)
+    return ["nodes": nodes, "truncated": truncated, "ms": Int(msSince(t0).rounded())]
+}
+
+// MARK: - Clipboard (op `watch`, pushed events)
+
+let clipQueue = DispatchQueue(label: "autotrack.clipboard")
+var clipTimer: DispatchSourceTimer?
+var clipCount = -1
+let concealedTypes: Set<String> = ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"]
+let clipTextMax = 4096
+
+// Polled at 4 Hz: changeCount is one cheap read. A change sends the types, the text's length and
+// its first 4,096 characters, never text that is concealed or copied under secure input.
+func clipboardTick() {
+    let pb = NSPasteboard.general
+    let n = pb.changeCount
+    if n == clipCount { return }
+    let first = clipCount < 0
+    clipCount = n
+    if first { return }
+    let types = (pb.types ?? []).map { $0.rawValue }
+    let concealed = types.contains { concealedTypes.contains($0) }
+    let secure = IsSecureEventInputEnabled()
+    var ev: [String: Any] = [
+        "event": "clipboard", "types": Array(types.prefix(20)), "length": 0, "concealed": concealed, "secure": secure,
+    ]
+    if let text = pb.string(forType: .string) {
+        ev["length"] = text.count
+        if !concealed && !secure { ev["text"] = String(text.prefix(clipTextMax)) }
+    }
+    emit(ev)
+}
+
+func watchClipboard() {
+    clipQueue.sync {
+        if clipTimer != nil { return }
+        let t = DispatchSource.makeTimerSource(queue: clipQueue)
+        t.schedule(deadline: .now(), repeating: .milliseconds(250), leeway: .milliseconds(50))
+        t.setEventHandler { autoreleasepool { clipboardTick() } }
+        t.resume()
+        clipTimer = t
+    }
+}
+
+// nil: answered later, from a worker.
+func handle(_ req: [String: Any]) -> [String: Any]? {
     var res: [String: Any] = ["id": req["id"] ?? NSNull()]
     switch req["op"] as? String {
+    case "tree":
+        let max = Int(num(req["max"]) ?? 1500), depth = Int(num(req["depth"]) ?? 25)
+        let budget = num(req["budgetMs"]) ?? 750
+        treeQueue.async {
+            autoreleasepool {
+                res.merge(opTree(max: max, depth: depth, budgetMs: budget)) { $1 }
+                emit(res)
+            }
+        }
+        return nil
+    case "watch":
+        if (req["clipboard"] as? Bool) == true { watchClipboard() }
+        res["ok"] = true
     case "at":
         let wait = num(req["wait"]).map { Float(min(max($0, 40), 2000) * 0.8 / 1000) } ?? axTimeout
         if let x = num(req["x"]), let y = num(req["y"]) { res["element"] = opAt(x, y, wait: wait) } else { res["element"] = NSNull() }
@@ -492,16 +684,25 @@ func handleShots(_ req: [String: Any]) -> [String: Any] {
     return res
 }
 
-func serve(_ handler: ([String: Any]) -> [String: Any]) {
+let emitLock = NSLock()
+
+// One whole line at a time, whichever thread answers.
+func emit(_ res: [String: Any]) {
+    guard let out = try? JSONSerialization.data(withJSONObject: res), let s = String(data: out, encoding: .utf8) else { return }
+    emitLock.lock()
+    print(s)
+    fflush(stdout)
+    emitLock.unlock()
+}
+
+func serve(_ handler: ([String: Any]) -> [String: Any]?) {
     while let line = readLine() {
         guard let data = line.data(using: .utf8),
               let req = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
-        let res = autoreleasepool { handler(req) }  // no run loop here: free CG's autoreleased images per request
-        if let out = try? JSONSerialization.data(withJSONObject: res), let s = String(data: out, encoding: .utf8) {
-            print(s)
-            fflush(stdout)
-        }
+        // no run loop here: free CG's autoreleased images per request
+        if let res = autoreleasepool(invoking: { handler(req) }) { emit(res) }
     }
+    treeQueue.sync {}  // a tree asked for just before stdin closed still answers
 }
 
 if CommandLine.arguments.contains("--shots") {

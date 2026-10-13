@@ -94,6 +94,28 @@ describe("journal", () => {
     j.close();
   });
 
+  it("stores trees as trees/<n>.<ext>, numbered over the session, with their event", () => {
+    const j = new Journal({ sessions: tmp(), meta, now: () => T0, segmentEvents: 2 });
+    const tree = (n: number): Event => ({ kind: "tree", tree: n, t: n, ts: T0 + n });
+    expect(j.writeTree('{"nodes":[]}', "json", tree)).toBe(0);
+    j.write(ev(1));
+    expect(
+      j.writeTree("page text", "txt", (n) => ({ ...ev(2), kind: "web", treeFile: n }) as Event),
+    ).toBe(1);
+    expect(readFileSync(join(j.dir, "000", "trees", "0.json"), "utf8")).toBe('{"nodes":[]}');
+    expect(readFileSync(join(j.dir, "001", "trees", "1.txt"), "utf8")).toBe("page text");
+    expect(JSON.parse(lines(join(j.dir, "000", "events.jsonl"))[0] as string)).toMatchObject({
+      kind: "tree",
+      tree: 0,
+    });
+    expect(JSON.parse(lines(join(j.dir, "001", "events.jsonl"))[0] as string)).toMatchObject({
+      treeFile: 1,
+    });
+    expect([j.trees, j.events]).toEqual([2, 3]);
+    j.close();
+    expect(j.writeTree("x", "txt", tree)).toBeNull();
+  });
+
   it("a segment with a save in flight is not closed; it rotates once the save is done", () => {
     const j = new Journal({ sessions: tmp(), meta, now: () => T0, segmentEvents: 1 });
     j.write(ev(0));

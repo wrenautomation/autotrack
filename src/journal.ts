@@ -1,8 +1,8 @@
 /**
- * A session on disk: `session.json`, then segments `000/`, `001/`, … each with `events.jsonl`
- * and `frames/<n>.jpg`. A segment closes after 5 minutes or 2,000 events; `.done` is written
- * last, so the shipper never takes a half-written one. Writes are synchronous appends: a crash
- * loses nothing written, and the next start closes what it left open.
+ * A session on disk: `session.json`, then segments `000/`, `001/`, … each with `events.jsonl`,
+ * `frames/<n>.jpg` and `trees/<n>.json|txt`. A segment closes after 5 minutes or 2,000 events;
+ * `.done` is written last, so the shipper never takes a half-written one. Writes are synchronous
+ * appends: a crash loses nothing written, and the next start closes what it left open.
  */
 import { randomBytes } from "node:crypto";
 import {
@@ -93,11 +93,13 @@ export class Journal {
   private segEvents = 0;
   private segFrames = 0;
   private frameNo = 0;
+  private treeNo = 0;
   private pending = 0; // reserved frames not yet saved
   private readonly now: () => number;
   private closed = false;
   events = 0;
   frames = 0;
+  trees = 0;
 
   private readonly opts: JournalOptions;
 
@@ -133,6 +135,24 @@ export class Journal {
     writeSync(this.fd as number, `${JSON.stringify(e)}\n`);
     this.segEvents++;
     this.events++;
+  }
+
+  /**
+   * Store a tree as `trees/<n>.<ext>` (n counts over the session) and write the event naming it,
+   * in the same segment. Returns n, or null once closed.
+   */
+  writeTree(body: string, ext: "json" | "txt", event: (n: number) => Event): number | null {
+    if (this.closed) return null;
+    this.rotateIfDue();
+    const n = this.treeNo++;
+    const dir = join(this.segDir, "trees");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${n}.${ext}`), body);
+    writeSync(this.fd as number, `${JSON.stringify(event(n))}\n`);
+    this.segEvents++;
+    this.events++;
+    this.trees++;
+    return n;
   }
 
   /**

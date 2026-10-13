@@ -5,7 +5,9 @@
  *   node test/e2e/check.mjs --dir <stub root>/<bucket>/<device> [--soft input,screen] [--mac]
  *
  * Hard checks: a session arrived, session.json has endedAt, events parse and are in time order,
- * the typed password never appears anywhere. Checks that need an OS permission the runner may not
+ * the typed password never appears anywhere (events, session.json, trees). Signal: every act
+ * carries `out`, trees arrived as `trees/<n>.json.gz` named by their events and never hold a value,
+ * the driver's copy is a clipboard event. Checks that need an OS permission the runner may not
  * grant (input: typed "hello", clicks with an element role, Submit named, the redacted run; screen:
  * frames) turn into loud `::warning::` lines when named in --soft, never silent passes.
  * --mac: macOS secure input hides keystrokes in a password box from every event tap, so a missing
@@ -16,6 +18,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 
 const PASSWORD = "hunter2pw";
+const CLIP = "autotrack e2e clip 42";
 const args = process.argv.slice(2);
 const opt = (name) => {
   const i = args.indexOf(name);
@@ -83,6 +86,7 @@ const sessions = files(dir).filter((s) => isDir(join(dir, s)));
 check(sessions.length > 0, `${sessions.length} session(s) under ${dir}`);
 
 const events = [];
+const trees = new Map(); // "<session>/<n>" → parsed tree
 let frames = 0;
 let raw = "";
 for (const s of sessions) {
@@ -129,7 +133,22 @@ for (const s of sessions) {
         fail(`${s}/${g}: events out of order: t ${ev.t} after ${lastT} (${line.slice(0, 120)})`);
       }
       lastT = ev.t;
+      ev.seg = `${s}/${g}`;
       events.push(ev);
+    }
+    for (const f of files(join(sdir, g, "trees"))) {
+      const m = /^(\d+)\.(json|txt)\.gz$/.exec(f);
+      if (!m) {
+        fail(`${s}/${g}/trees/${f}: want <n>.json.gz or <n>.txt.gz`);
+        continue;
+      }
+      try {
+        const text = gunzipSync(readFileSync(join(sdir, g, "trees", f))).toString("utf8");
+        raw += text;
+        trees.set(`${s}/${g}/${m[1]}`, m[2] === "json" ? JSON.parse(text) : text);
+      } catch (e) {
+        fail(`${s}/${g}/trees/${f}: not gzip ${m[2]} (${e.message})`);
+      }
     }
     for (const f of files(join(sdir, g, "frames"))) {
       const b = readFileSync(join(sdir, g, "frames", f));
@@ -180,6 +199,40 @@ check(
   clicks.some((c) => /submit/i.test(c.element?.name ?? "")),
   `the Submit button click is named "Submit"`,
   "input",
+);
+
+// Signal: what each act did, the trees, the clipboard.
+const acts = events.filter((e) => ["click", "drag", "scroll", "key", "text"].includes(e.kind));
+const outs = ["screen", "focus", "dialog", "window"];
+const shaped = acts.filter((e) => e.out && outs.every((k) => typeof e.out[k] === "boolean"));
+check(
+  acts.length > 0 && shaped.length === acts.length,
+  `every act carries out (${shaped.length}/${acts.length})`,
+);
+const treeEvents = events.filter((e) => e.kind === "tree");
+const stored = treeEvents.filter((e) => Array.isArray(trees.get(`${e.seg}/${e.tree}`)?.nodes));
+for (const e of treeEvents) {
+  const t = trees.get(`${e.seg}/${e.tree}`);
+  console.log(
+    `      tree ${e.tree} of ${e.app?.name ?? "?"}: ${t?.nodes?.length ?? "missing"} node(s), ${t?.ms ?? "?"} ms`,
+  );
+}
+check(
+  treeEvents.length > 0 && stored.length === treeEvents.length,
+  `${treeEvents.length} tree(s), each stored as trees/<n>.json.gz in its segment`,
+);
+const valued = [...trees.values()].filter(
+  (t) => Array.isArray(t?.nodes) && t.nodes.some((n) => "value" in n),
+);
+check(valued.length === 0, "no tree node carries a value");
+const clips = events.filter((e) => e.kind === "clipboard");
+for (const c of clips)
+  console.log(
+    `      clipboard ${c.length} char(s) ${JSON.stringify(c.text)} redacted=${c.redacted}`,
+  );
+check(
+  clips.some((c) => c.text === CLIP && c.redacted === false),
+  `the driver's copy recorded as a clipboard event`,
 );
 
 const redacted = texts.filter((t) => t.redacted);

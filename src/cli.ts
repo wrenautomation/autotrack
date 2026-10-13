@@ -27,6 +27,7 @@ import { type Coords, coordsFor } from "./coords.ts";
 import { startHook, uiohook } from "./hook.ts";
 import { notify } from "./notify.ts";
 import { helperCommand, openProbe, PACKAGE_ROOT } from "./probe.ts";
+import { ask } from "./prompt.ts";
 import { Recorder, type Status } from "./recorder.ts";
 import { noShipper, type Shipper, shipperFor } from "./ship.ts";
 import { syntheticHook, syntheticRate } from "./synthetic.ts";
@@ -104,7 +105,7 @@ async function openRecorder(
           ),
     coords: () => coords,
     displayAt: capturer.displayAt,
-    ...(opts.notify ? { notify: (m: string) => notify(m) } : {}),
+    ...(opts.notify ? { notify: (m: string) => notify(m), ask } : {}),
     shipper: opts.shipper,
     log: opts.log,
   });

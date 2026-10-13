@@ -1,5 +1,7 @@
 # autotrack probe (Windows): long-lived helper. One JSON request per line on stdin, one answer per
-# line on stdout. Ops: at, front, focused, perm. See designs/2026-10-13-track.md "Probe protocol".
+# line on stdout. Ops: at, front, focused, perm, tree, watch. See designs/2026-10-13-autotrack.md
+# "Probe protocol". `tree` is answered from a pool thread and `watch` starts an STA thread that
+# pushes `{"event":"clipboard",…}` lines; AutotrackBg's one locked writer keeps every line whole.
 # Windows PowerShell 5.1 syntax only. Run: powershell -NoProfile -ExecutionPolicy Bypass -File probe.ps1
 #
 # COORDINATE SPACE: physical screen pixels on the virtual desktop (primary monitor's top-left is 0,0;
@@ -491,6 +493,389 @@ public static class AutotrackNative {
 Write-Stage ('DPI awareness: ' + [AutotrackNative]::EnableDpiAwareness())
 Add-Type -AssemblyName WindowsBase, UIAutomationClient, UIAutomationTypes
 Write-Stage 'UI Automation loaded'
+$uiaRefs = @([System.Windows.Automation.AutomationElement].Assembly.Location,
+    [System.Windows.Automation.ControlType].Assembly.Location,
+    [System.Windows.Rect].Assembly.Location)
+Add-Type -ReferencedAssemblies $uiaRefs -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Windows.Automation;
+
+// The probe's work off the request loop: one locked stdout writer (answers from any thread stay
+// whole lines), the `tree` walk on a pool thread, the clipboard poll on an STA thread, and the
+// front window's dialog words and window count. Never an element's value. C# 5 only.
+public static class AutotrackBg {
+    static readonly object outLock = new object();
+    static StreamWriter stdout;
+
+    public static void Open() {
+        stdout = new StreamWriter(Console.OpenStandardOutput(), new ASCIIEncoding());
+        stdout.AutoFlush = true;
+        stdout.NewLine = "\n";
+    }
+
+    // Everything above ASCII escaped, so the line is the same bytes under any console code page.
+    public static void Emit(string json) {
+        StringBuilder sb = new StringBuilder(json.Length + 16);
+        foreach (char ch in json) {
+            if (ch < 0x80) sb.Append(ch);
+            else sb.Append("\\u").Append(((int)ch).ToString("x4"));
+        }
+        lock (outLock) { stdout.WriteLine(sb.ToString()); }
+    }
+
+    static void Str(StringBuilder sb, string s) {
+        sb.Append('"');
+        foreach (char ch in s ?? "") {
+            switch (ch) {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (ch < 0x20) sb.Append("\\u").Append(((int)ch).ToString("x4"));
+                    else sb.Append(ch);
+                    break;
+            }
+        }
+        sb.Append('"');
+    }
+
+    static int Round(double v) {
+        if (double.IsNaN(v) || double.IsInfinity(v)) return 0;
+        return (int)Math.Round(v);
+    }
+
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] static extern int GetWindowLongW(IntPtr h, int index);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+    delegate bool EnumWindowsProc(IntPtr h, IntPtr data);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc fn, IntPtr data);
+
+    // ---- names: never one that shows the element's value (see probe.ps1 Get-SafeName) ----
+
+    public static bool ShowsValue(string name, string value) {
+        string n = (name ?? "").Trim(), v = (value ?? "").Trim();
+        if (n.Length == 0 || v.Length == 0) return false;
+        return n == v || (v.Length >= 3 && n.Contains(v)) || (n.Length >= 12 && v.Contains(n));
+    }
+
+    static string ValueOf(AutomationElement el) {
+        try {
+            object v = el.GetCachedPropertyValue(ValuePattern.ValueProperty, true);
+            string s = v as string;
+            return s ?? "";
+        } catch (Exception) { return ""; }
+    }
+
+    static string LabelOf(AutomationElement el) {
+        try {
+            AutomationElement lb = el.Cached.LabeledBy;
+            return lb == null ? "" : (lb.Current.Name ?? "");
+        } catch (Exception) { return ""; }
+    }
+
+    public static string RoleOf(ControlType ct) {
+        string p = ct == null ? "" : ct.ProgrammaticName;
+        if (p.StartsWith("ControlType.")) p = p.Substring(12);
+        return p.ToLowerInvariant();
+    }
+
+    static string SafeName(AutomationElement el, string role) {
+        string cls = el.Cached.ClassName ?? "";
+        if (role == "document" || cls.IndexOf("edit", StringComparison.OrdinalIgnoreCase) >= 0) return LabelOf(el);
+        string name = el.Cached.Name ?? "";
+        if (name.Length == 0) return name;
+        string value = ValueOf(el);
+        if (!ShowsValue(name, value)) return name;
+        string label = LabelOf(el);
+        return ShowsValue(label, value) ? "" : label;
+    }
+
+    // ---- tree ----
+
+    static CacheRequest treeCache;
+    static readonly HashSet<string> passThrough = new HashSet<string> {
+        "pane", "group", "custom", "text", "image", "dataitem" };
+    static readonly HashSet<string> leaves = new HashSet<string> { "edit", "combobox" };
+    const int nameMax = 200;
+    static int treeBusy;
+
+    static CacheRequest TreeCache() {
+        if (treeCache != null) return treeCache;
+        CacheRequest c = new CacheRequest();
+        c.Add(AutomationElement.NameProperty);
+        c.Add(AutomationElement.ControlTypeProperty);
+        c.Add(AutomationElement.BoundingRectangleProperty);
+        c.Add(AutomationElement.IsPasswordProperty);
+        c.Add(AutomationElement.AutomationIdProperty);
+        c.Add(AutomationElement.IsOffscreenProperty);
+        c.Add(AutomationElement.LabeledByProperty);
+        c.Add(AutomationElement.ClassNameProperty);
+        c.Add(AutomationElement.NativeWindowHandleProperty);
+        c.Add(ValuePattern.ValueProperty);
+        treeCache = c;
+        return c;
+    }
+
+    // Answers `{"id":…,"nodes":[…],"truncated":…,"ms":…}` from a pool thread; a second tree while
+    // one runs answers empty and truncated.
+    public static void StartTree(long id, int max, int depth, int budgetMs) {
+        if (Interlocked.CompareExchange(ref treeBusy, 1, 0) != 0) {
+            Emit("{\"id\":" + id + ",\"nodes\":[],\"truncated\":true,\"ms\":0}");
+            return;
+        }
+        ThreadPool.QueueUserWorkItem(delegate(object o) {
+            try { Emit(Tree(id, max, depth, budgetMs)); }
+            catch (Exception) { Emit("{\"id\":" + id + ",\"nodes\":null}"); }
+            finally { Interlocked.Exchange(ref treeBusy, 0); }
+        });
+    }
+
+    class Walk {
+        public StringBuilder sb = new StringBuilder(32768);
+        public int count, max, maxDepth, budgetMs;
+        public bool truncated;
+        public System.Diagnostics.Stopwatch clock;
+        public CacheRequest cache;
+        public TreeWalker walker = TreeWalker.ControlViewWalker;
+    }
+
+    // The foreground window, walked depth first with the ControlView walker: on-screen nodes inside
+    // the window only, unnamed id-less containers and labels skipped (their children take their
+    // depth), edits and combo boxes as leaves, `max` nodes, `depth` emitted levels, `budgetMs`.
+    public static string Tree(long id, int max, int depth, int budgetMs) {
+        Walk w = new Walk();
+        w.max = max; w.maxDepth = depth; w.budgetMs = budgetMs;
+        w.clock = System.Diagnostics.Stopwatch.StartNew();
+        w.cache = TreeCache();
+        w.sb.Append("{\"id\":").Append(id).Append(",\"nodes\":[");
+        IntPtr h = GetForegroundWindow();
+        if (h != IntPtr.Zero) {
+            AutomationElement root;
+            using (w.cache.Activate()) { root = AutomationElement.FromHandle(h); }
+            System.Windows.Rect clip = root.Cached.BoundingRectangle;
+            Visit(w, root, 0, 0, clip);
+        }
+        w.sb.Append("],\"truncated\":").Append(w.truncated ? "true" : "false");
+        w.sb.Append(",\"ms\":").Append(w.clock.ElapsedMilliseconds).Append('}');
+        return w.sb.ToString();
+    }
+
+    [DllImport("user32.dll")] static extern IntPtr SendMessageTimeoutW(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr result);
+
+    // IsPassword, or a Win32 edit class (WinForms, RichEdit) whose window masks its text: UIA's
+    // proxy sees those as Panes with IsPassword false. Same test as AutotrackNative.PasswordEdit.
+    static bool Secure(AutomationElement.AutomationElementInformation c) {
+        if (c.IsPassword) return true;
+        if ((c.ClassName ?? "").IndexOf("edit", StringComparison.OrdinalIgnoreCase) < 0) return false;
+        IntPtr h = new IntPtr(c.NativeWindowHandle);
+        if (h == IntPtr.Zero) return false;
+        if ((GetWindowLongW(h, -16) & 0x20) != 0) return true;
+        IntPtr r;
+        return SendMessageTimeoutW(h, 0xD2, IntPtr.Zero, IntPtr.Zero, 0x2, 50, out r) != IntPtr.Zero && r != IntPtr.Zero;
+    }
+
+    static void Visit(Walk w, AutomationElement el, int depth, int raw, System.Windows.Rect clip) {
+        if (w.truncated) return;
+        if (w.count >= w.max || w.clock.ElapsedMilliseconds > w.budgetMs || raw > 60) { w.truncated = true; return; }
+        AutomationElement.AutomationElementInformation c = el.Cached;
+        if (c.IsOffscreen) return;
+        System.Windows.Rect r = c.BoundingRectangle;
+        bool sized = !r.IsEmpty && r.Width > 0 && r.Height > 0;
+        if (sized && !r.IntersectsWith(clip)) return;
+        string role = RoleOf(c.ControlType);
+        string name = SafeName(el, role);
+        if (name.Length > nameMax) name = name.Substring(0, nameMax);
+        string aid = c.AutomationId ?? "";
+        bool skip = !sized || (name.Length == 0 && aid.Length == 0 && passThrough.Contains(role));
+        int next = depth;
+        if (!skip) {
+            if (depth >= w.maxDepth) { w.truncated = true; return; }
+            System.Windows.Rect v = System.Windows.Rect.Intersect(r, clip);
+            if (w.count > 0) w.sb.Append(',');
+            w.sb.Append("{\"role\":"); Str(w.sb, role);
+            w.sb.Append(",\"name\":"); Str(w.sb, name);
+            if (aid.Length > 0) { w.sb.Append(",\"id\":"); Str(w.sb, aid); }
+            w.sb.Append(",\"x\":").Append(Round(v.X)).Append(",\"y\":").Append(Round(v.Y));
+            w.sb.Append(",\"width\":").Append(Round(v.Width)).Append(",\"height\":").Append(Round(v.Height));
+            w.sb.Append(",\"depth\":").Append(depth);
+            if (Secure(c)) w.sb.Append(",\"secure\":true");
+            w.sb.Append('}');
+            w.count++;
+            next = depth + 1;
+        }
+        if (leaves.Contains(role)) return;
+        System.Windows.Rect inner = clip;
+        if (sized && (role == "pane" || role == "document" || role == "list" || role == "tree")) inner = System.Windows.Rect.Intersect(clip, r);
+        AutomationElement k = w.walker.GetFirstChild(el, w.cache);
+        while (k != null && !w.truncated) {
+            Visit(w, k, next, raw + 1, inner);
+            k = w.walker.GetNextSibling(k, w.cache);
+        }
+    }
+
+    // ---- front: dialog and window count ----
+
+    static CacheRequest dialogCache;
+
+    // The foreground window as a dialog: [title, text, buttons...] or null. A dialog is the
+    // #32770 class or a modal UIA window; its words come from Text and Button children (60 at most).
+    public static string[] Dialog(IntPtr h) {
+        if (h == IntPtr.Zero) return null;
+        StringBuilder cls = new StringBuilder(64);
+        GetClassNameW(h, cls, cls.Capacity);
+        if (dialogCache == null) {
+            CacheRequest c = new CacheRequest();
+            c.Add(AutomationElement.NameProperty);
+            c.Add(AutomationElement.ControlTypeProperty);
+            c.Add(WindowPattern.IsModalProperty);
+            dialogCache = c;
+        }
+        AutomationElement win;
+        using (dialogCache.Activate()) { win = AutomationElement.FromHandle(h); }
+        bool modal = false;
+        try { modal = (bool)win.GetCachedPropertyValue(WindowPattern.IsModalProperty, true) == true; } catch (Exception) { }
+        if (cls.ToString() != "#32770" && !modal) return null;
+        List<string> texts = new List<string>();
+        List<string> buttons = new List<string>();
+        int seen = 0;
+        DialogWalk(win, 0, texts, buttons, ref seen);
+        string title = win.Cached.Name ?? "";
+        if (title.Length == 0 && texts.Count > 0) { title = texts[0]; texts.RemoveAt(0); }
+        texts.RemoveAll(delegate(string t) { return t == title; });
+        List<string> outList = new List<string>();
+        outList.Add(title);
+        outList.Add(string.Join("\n", texts.ToArray()));
+        outList.AddRange(buttons);
+        return outList.ToArray();
+    }
+
+    static void DialogWalk(AutomationElement el, int depth, List<string> texts, List<string> buttons, ref int seen) {
+        if (depth >= 4) return;
+        AutomationElement k = TreeWalker.ControlViewWalker.GetFirstChild(el, dialogCache);
+        while (k != null && seen < 60) {
+            seen++;
+            ControlType ct = k.Cached.ControlType;
+            string name = k.Cached.Name ?? "";
+            if (ct == ControlType.Text) { if (name.Length > 0) texts.Add(name); }
+            else if (ct == ControlType.Button) { if (name.Length > 0) buttons.Add(name); }
+            else if (ct != ControlType.Edit && ct != ControlType.Document && ct != ControlType.ComboBox) DialogWalk(k, depth + 1, texts, buttons, ref seen);
+            k = TreeWalker.ControlViewWalker.GetNextSibling(k, dialogCache);
+        }
+    }
+
+    // Visible top-level windows of the process, tool windows left out.
+    public static int Windows(uint pid) {
+        int n = 0;
+        EnumWindows(delegate(IntPtr h, IntPtr d) {
+            uint p;
+            GetWindowThreadProcessId(h, out p);
+            if (p == pid && IsWindowVisible(h) && (GetWindowLongW(h, -20) & 0x80) == 0) n++;
+            return true;
+        }, IntPtr.Zero);
+        return n;
+    }
+
+    // ---- clipboard ----
+
+    [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll")] static extern uint EnumClipboardFormats(uint format);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClipboardFormatNameW(uint format, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint format);
+    [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr h);
+    [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr h);
+    [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr h);
+
+    static Thread clipThread;
+    static readonly Dictionary<uint, string> stdFormats = new Dictionary<uint, string> {
+        { 1, "text" }, { 2, "bitmap" }, { 8, "dib" }, { 13, "unicodetext" }, { 15, "files" }, { 17, "dibv5" } };
+    static readonly HashSet<string> concealedFormats = new HashSet<string> {
+        "ExcludeClipboardContentFromMonitorProcessing", "Clipboard Viewer Ignore" };
+    const int clipTextMax = 4096;
+
+    public static void WatchClipboard() {
+        lock (outLock) {
+            if (clipThread != null) return;
+            clipThread = new Thread(ClipLoop);
+            clipThread.IsBackground = true;
+            clipThread.SetApartmentState(ApartmentState.STA);
+            clipThread.Start();
+        }
+    }
+
+    // 4 Hz on the sequence number; a change read while another app holds the clipboard is retried.
+    static void ClipLoop() {
+        uint last = GetClipboardSequenceNumber();
+        while (true) {
+            Thread.Sleep(250);
+            uint n = GetClipboardSequenceNumber();
+            if (n == last) continue;
+            string ev = ClipEvent();
+            if (ev == null) continue;
+            last = n;
+            Emit(ev);
+        }
+    }
+
+    static string ClipEvent() {
+        if (!OpenClipboard(IntPtr.Zero)) return null;
+        List<string> types = new List<string>();
+        bool concealed = false, hasText = false;
+        string text = null;
+        try {
+            uint f = 0;
+            while ((f = EnumClipboardFormats(f)) != 0) {
+                string name;
+                if (!stdFormats.TryGetValue(f, out name)) {
+                    StringBuilder sb = new StringBuilder(128);
+                    name = GetClipboardFormatNameW(f, sb, sb.Capacity) > 0 ? sb.ToString() : ("#" + f);
+                }
+                if (concealedFormats.Contains(name)) concealed = true;
+                if (f == 13) hasText = true;
+                if (types.Count < 20) types.Add(name);
+            }
+            if (hasText) {
+                IntPtr h = GetClipboardData(13);
+                if (h != IntPtr.Zero) {
+                    IntPtr p = GlobalLock(h);
+                    if (p != IntPtr.Zero) {
+                        try {
+                            int max = (int)Math.Min((ulong)GlobalSize(h).ToUInt64() / 2, (ulong)int.MaxValue);
+                            text = Marshal.PtrToStringUni(p, max);
+                            int nul = text.IndexOf('\0');
+                            if (nul >= 0) text = text.Substring(0, nul);
+                        } finally { GlobalUnlock(h); }
+                    }
+                }
+            }
+        } finally { CloseClipboard(); }
+        StringBuilder o = new StringBuilder(256);
+        o.Append("{\"event\":\"clipboard\",\"types\":[");
+        for (int i = 0; i < types.Count; i++) { if (i > 0) o.Append(','); Str(o, types[i]); }
+        o.Append("],\"length\":").Append(text == null ? 0 : text.Length);
+        o.Append(",\"concealed\":").Append(concealed ? "true" : "false");
+        if (text != null && !concealed) {
+            o.Append(",\"text\":");
+            Str(o, text.Length > clipTextMax ? text.Substring(0, clipTextMax) : text);
+        }
+        o.Append('}');
+        return o.ToString();
+    }
+}
+'@
+Write-Stage 'worker compiled'
 
 function ConvertTo-Rounded([double]$v) {
     if ([double]::IsNaN($v) -or [double]::IsInfinity($v)) { return 0 }
@@ -622,7 +1007,12 @@ function Get-FrontJson {
     if ($null -ne $b) {
         $window = [ordered]@{ title = [AutotrackNative]::Title($h); x = $b[0]; y = $b[1]; width = $b[2]; height = $b[3] }
     }
-    return @{ app = $app; window = $window }
+    $dialog = $null
+    try {
+        $d = [AutotrackBg]::Dialog($h)
+        if ($null -ne $d) { $dialog = [ordered]@{ title = $d[0]; text = $d[1]; buttons = @($d | Select-Object -Skip 2) } }
+    } catch { }
+    return @{ app = $app; window = $window; dialog = $dialog; windows = [AutotrackBg]::Windows($procId) }
 }
 
 function Invoke-Op($req) {
@@ -644,6 +1034,20 @@ function Invoke-Op($req) {
                 $f = Get-FrontJson
                 $res['app'] = $f.app
                 $res['window'] = $f.window
+                $res['windows'] = $f.windows
+                $res['dialog'] = $f.dialog
+            }
+            'tree' {
+                $max = 1500; $depth = 25; $budget = 750
+                if ($null -ne $req.max) { $max = [int]$req.max }
+                if ($null -ne $req.depth) { $depth = [int]$req.depth }
+                if ($null -ne $req.budgetMs) { $budget = [int]$req.budgetMs }
+                [AutotrackBg]::StartTree([long]$req.id, $max, $depth, $budget)
+                return $null # answered by the worker
+            }
+            'watch' {
+                if ($req.clipboard -eq $true) { [AutotrackBg]::WatchClipboard() }
+                $res['ok'] = $true
             }
             'perm' {
                 $res['accessibility'] = $true; $res['screen'] = $true; $res['input'] = $true
@@ -661,15 +1065,11 @@ function Invoke-Op($req) {
     return $res
 }
 
-# Escape everything above ASCII so the line is the same bytes under any console code page.
-$escape = [System.Text.RegularExpressions.MatchEvaluator]{ param($m) '\u{0:x4}' -f [int][char]$m.Value }
 
 # UTF-8 in, BOM dropped: a .NET parent whose console is UTF-8 writes one before its first line,
 # which ConvertFrom-Json refuses (the shots helper's StreamReader skips it by itself).
 $stdin = New-Object System.IO.StreamReader -ArgumentList ([Console]::OpenStandardInput()), (New-Object System.Text.UTF8Encoding -ArgumentList $false)
-$stdout = New-Object System.IO.StreamWriter -ArgumentList ([Console]::OpenStandardOutput()), (New-Object System.Text.ASCIIEncoding)
-$stdout.AutoFlush = $true
-$stdout.NewLine = "`n"
+[AutotrackBg]::Open()
 Write-Stage 'ready'
 while ($true) {
     $line = $stdin.ReadLine()
@@ -684,9 +1084,8 @@ while ($true) {
         continue
     }
     try {
-        $json = (Invoke-Op $req) | ConvertTo-Json -Compress -Depth 4
-        $json = [System.Text.RegularExpressions.Regex]::Replace($json, '[^\x00-\x7F]', $escape)
-        $stdout.WriteLine($json)
+        $res = Invoke-Op $req
+        if ($null -ne $res) { [AutotrackBg]::Emit(($res | ConvertTo-Json -Compress -Depth 4)) }
     } catch {
         Write-Stage ('answer failed: ' + $_.Exception.Message)
     }

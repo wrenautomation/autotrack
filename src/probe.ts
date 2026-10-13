@@ -1,7 +1,9 @@
 /**
  * Client for the probe helper (helpers/mac/probe, helpers/win/probe.ps1): what app and window is
- * in front, what element is at a point or has focus, which permissions are granted. Each answer
- * has 50 ms; a miss is `null`. The child machinery is in `helper.ts`.
+ * in front (and whether it is a dialog), what element is at a point or has focus, which
+ * permissions are granted. Each answer has 50 ms; a miss is `null`. `tree` walks the front
+ * window on the helper's own worker and has seconds. Clipboard changes come unasked once watched.
+ * The child machinery is in `helper.ts`.
  */
 
 import type { App, Element, WindowInfo } from "./events.ts";
@@ -12,9 +14,18 @@ export { helperCommand, PACKAGE_ROOT, spawnHelper } from "./helper.ts";
 export interface AtAnswer {
   element: Element | null;
 }
+export interface DialogInfo {
+  title: string;
+  text: string;
+  buttons: string[];
+}
 export interface FrontAnswer {
   app: App | null;
   window: WindowInfo | null;
+  /** How many windows the front app has open. */
+  windows?: number;
+  /** Set when the front window is an alert, sheet or modal dialog. */
+  dialog?: DialogInfo | null;
 }
 export interface FocusedAnswer {
   element: Element | null;
@@ -24,6 +35,43 @@ export interface PermAnswer {
   screen: boolean;
   input: boolean;
 }
+
+/** One node of the front window's tree: never a value; `secure` marks a password field. */
+export interface TreeNode {
+  role: string;
+  name: string;
+  id?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  depth: number;
+  secure?: boolean;
+}
+export interface TreeAnswer {
+  nodes: TreeNode[];
+  /** A cap (nodes, depth, time) cut the walk short. */
+  truncated: boolean;
+  /** How long the walk took in the helper. */
+  ms: number;
+}
+
+/** A clipboard change, pushed by the helper (`{"event":"clipboard",…}`). */
+export interface ClipboardChange {
+  types: string[];
+  /** Characters of text on the clipboard; 0 when there is none. */
+  length: number;
+  /** The first 4,096 characters; absent when concealed or there is no text. */
+  text?: string;
+  /** The copying app marked it concealed or transient (password managers). */
+  concealed: boolean;
+  /** Secure input was on when it changed (Mac: a password field had focus). */
+  secure?: boolean;
+}
+
+export const TREE_NODES = 1500;
+export const TREE_DEPTH = 25;
+export const TREE_BUDGET_MS = 750;
 
 /** What the client needs of a child process; tests pass a fake. */
 export type ProbeChild = HelperChild;
@@ -50,12 +98,40 @@ export class Probe extends HelperClient {
   front(): Promise<FrontAnswer | null> {
     return this.call("front");
   }
-  focused(): Promise<FocusedAnswer | null> {
-    return this.call("focused");
+  focused(timeoutMs?: number): Promise<FocusedAnswer | null> {
+    return this.call("focused", {}, timeoutMs);
   }
   perm(timeoutMs = 2000): Promise<PermAnswer | null> {
     return this.call("perm", {}, timeoutMs);
   }
+  tree(timeoutMs = 3000): Promise<TreeAnswer | null> {
+    return this.call(
+      "tree",
+      { max: TREE_NODES, depth: TREE_DEPTH, budgetMs: TREE_BUDGET_MS },
+      timeoutMs,
+    );
+  }
+
+  /** Clipboard changes from now on, asked for again after every helper restart. */
+  watchClipboard(fn: (c: ClipboardChange) => void): void {
+    this.onEvent = (msg) => {
+      if (msg.event === "clipboard") fn(clipboardOf(msg));
+    };
+    this.onStart = () => void this.call("watch", { clipboard: true }, 5000);
+    if (this.running) this.onStart();
+  }
+}
+
+/** A pushed clipboard line as a `ClipboardChange`; anything malformed reads as empty. */
+export function clipboardOf(m: Record<string, unknown>): ClipboardChange {
+  const types = Array.isArray(m.types) ? m.types.filter((t) => typeof t === "string") : [];
+  return {
+    types: types.slice(0, 20) as string[],
+    length: typeof m.length === "number" && m.length >= 0 ? m.length : 0,
+    ...(typeof m.text === "string" ? { text: m.text } : {}),
+    concealed: m.concealed === true,
+    ...(m.secure === true ? { secure: true } : {}),
+  };
 }
 
 /** The probe for this OS, or one that answers null when the helper is missing. */

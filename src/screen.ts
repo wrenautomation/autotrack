@@ -120,9 +120,15 @@ export class Screen {
 
   /** The "after" frame: a capture 300 ms from now, written. */
   async after(sleep = defaultSleep): Promise<number | null> {
+    return (await this.afterFrame(sleep)).n;
+  }
+
+  /** `after`, with the capture's hash (null with no capture), for telling whether the screen moved. */
+  async afterFrame(sleep = defaultSleep): Promise<{ n: number | null; hash: string | null }> {
     await sleep(AFTER_MS);
-    if (this.o.blocked()) return null;
-    return this.number(await this.capture());
+    if (this.o.blocked()) return { n: null, hash: null };
+    const f = await this.capture();
+    return { n: await this.number(f), hash: f?.shot.hash ?? null };
   }
 
   /**

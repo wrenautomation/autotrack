@@ -1,5 +1,6 @@
 # Windows probe test: starts probe.ps1, opens its own text box window (test-form.ps1), checks perm,
-# front, focused, at on the text box, bad input, and `at` latency over 50 requests. Then starts `probe.ps1 --shots` and checks
+# front, focused, at on the text box, bad input, `at` latency over 50 requests, the form's tree, a
+# message box as front.dialog, and pushed clipboard events. Then starts `probe.ps1 --shots` and checks
 # displays, grab, save (JPEG, at most 1920 px), the ring and timing. Exits 1 and prints every failure.
 # Run: powershell -NoProfile -ExecutionPolicy Bypass -File test.ps1   (Windows PowerShell 5.1)
 $ErrorActionPreference = 'Stop'
@@ -37,6 +38,7 @@ $p = [System.Diagnostics.Process]::Start($psi)
 $testForm = $null
 $script:nextId = 1
 $all = New-Object System.Text.StringBuilder   # every response, to prove no value leaks
+$script:pushed = New-Object System.Collections.ArrayList   # lines the probe sent unasked (clipboard)
 
 function Send-Line([string]$text) { $p.StandardInput.WriteLine($text); $p.StandardInput.Flush() }
 
@@ -44,14 +46,17 @@ function Ask([hashtable]$req, [int]$timeoutMs = 5000) {
     $id = $script:nextId++
     $req['id'] = $id
     Send-Line ($req | ConvertTo-Json -Compress)
-    $task = $p.StandardOutput.ReadLineAsync()
-    if (-not $task.Wait($timeoutMs)) { throw "no answer to $($req.op) within $timeoutMs ms" }
-    $line = $task.Result
-    if ($null -eq $line) { throw "probe closed stdout (exit code $($p.ExitCode))" }
-    [void]$all.AppendLine($line)
-    $res = $line | ConvertFrom-Json
-    if ($res.id -ne $id) { throw "answer id $($res.id) for request $id" }
-    return $res
+    while ($true) {
+        $task = $p.StandardOutput.ReadLineAsync()
+        if (-not $task.Wait($timeoutMs)) { throw "no answer to $($req.op) within $timeoutMs ms" }
+        $line = $task.Result
+        if ($null -eq $line) { throw "probe closed stdout (exit code $($p.ExitCode))" }
+        [void]$all.AppendLine($line)
+        $res = $line | ConvertFrom-Json
+        if ($null -eq $res.PSObject.Properties['id'] -and $res.event) { [void]$script:pushed.Add($res); continue }
+        if ($res.id -ne $id) { throw "answer id $($res.id) for request $id" }
+        return $res
+    }
 }
 
 function Test-Element($e, [string]$what) {
@@ -189,6 +194,62 @@ try {
     Write-Host ('at latency ms: p50 {0:N1}  p95 {1:N1}  max {2:N1}' -f $p50, $p95, $max)
     if ($p95 -ge 50) { Write-Host 'WARN: p95 is over the 50 ms target (reported, not enforced on shared CI runners)' }
     Check ($p95 -lt 500) "p95 $p95 ms is over the 500 ms sanity bound"
+
+    # tree: the form's visible nodes, never a value key, within the caps asked for
+    $tree = Ask @{ op = 'tree'; max = 300; depth = 10; budgetMs = 750 } 10000
+    $nodes = @($tree.nodes)
+    $kb = [System.Text.Encoding]::UTF8.GetByteCount(($nodes | ConvertTo-Json -Compress -Depth 3)) / 1024
+    Write-Host ('tree: {0} nodes, {1:N1} KB, {2} ms in the helper, truncated {3}' -f $nodes.Count, $kb, $tree.ms, $tree.truncated)
+    Check ($tree.truncated -is [bool] -and $null -ne $tree.ms) 'tree shape'
+    Check ($nodes.Count -ge 3 -and $nodes.Count -le 300) "tree has $($nodes.Count) nodes"
+    $nodeKeys = 'role', 'name', 'id', 'x', 'y', 'width', 'height', 'depth', 'secure'
+    foreach ($n in $nodes) {
+        foreach ($prop in $n.PSObject.Properties) { Check ($nodeKeys -contains $prop.Name) "tree node has unexpected field '$($prop.Name)'" }
+        Check ($n.depth -ge 0 -and $n.depth -lt 10) "tree node depth $($n.depth)"
+    }
+    Check (@($nodes | Where-Object { $_.role -eq 'window' -and $_.name -eq $formTitle }).Count -eq 1) 'tree has no node for the form window'
+    Check (@($nodes | Where-Object { $_.role -match '^(edit|document|pane)$' }).Count -ge 2) 'tree lacks the two text boxes'
+
+    # a message box in front: front.dialog has its title, text and buttons
+    $dlg = Start-Process powershell.exe -PassThru -ArgumentList '-NoProfile', '-Command', "Add-Type -AssemblyName System.Windows.Forms; [void][System.Windows.Forms.MessageBox]::Show('Delete the draft?', 'Probe test', 'YesNo')"
+    try {
+        $fd = $null
+        for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Milliseconds 300
+            $cond = New-Object System.Windows.Automation.PropertyCondition ($UIA::NameProperty), 'Probe test'
+            $box = $UIA::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
+            if ($box) { try { [void][TestNative]::SetForegroundWindow([IntPtr]$box.Current.NativeWindowHandle) } catch { } }
+            $fd = Ask @{ op = 'front' }
+            if ($fd.dialog) { break }
+        }
+        Write-Host ('dialog front: ' + ($fd | ConvertTo-Json -Compress -Depth 4))
+        Check ($null -ne $fd.dialog) 'front.dialog is not set for a message box in front'
+        if ($fd.dialog) {
+            Check ($fd.dialog.title -eq 'Probe test') "dialog title '$($fd.dialog.title)'"
+            Check ($fd.dialog.text -eq 'Delete the draft?') "dialog text '$($fd.dialog.text)'"
+            Check ((@($fd.dialog.buttons) -join ',') -match 'Yes' -and (@($fd.dialog.buttons) -join ',') -match 'No') "dialog buttons '$(@($fd.dialog.buttons) -join ',')'"
+        }
+        Check ($fd.windows -ge 1) "front.windows is '$($fd.windows)'"
+    } finally { Stop-Process -Id $dlg.Id -Force -ErrorAction SilentlyContinue }
+
+    # clipboard: after `watch`, a copy pushes its text; one marked for exclusion pushes none
+    $wa = Ask @{ op = 'watch'; clipboard = $true }
+    Check ($wa.ok -eq $true) 'watch does not answer ok'
+    Start-Sleep -Milliseconds 400
+    [System.Windows.Forms.Clipboard]::SetText('probe clip 81')
+    Start-Sleep -Milliseconds 800
+    $obj = New-Object System.Windows.Forms.DataObject
+    $obj.SetData([System.Windows.Forms.DataFormats]::UnicodeText, 'hunter2-concealed')
+    $obj.SetData('ExcludeClipboardContentFromMonitorProcessing', (New-Object System.IO.MemoryStream))
+    [System.Windows.Forms.Clipboard]::SetDataObject($obj, $true)
+    Start-Sleep -Milliseconds 800
+    [void](Ask @{ op = 'perm' })   # collects what was pushed meanwhile
+    Write-Host ('clipboard events: ' + ($script:pushed | ConvertTo-Json -Compress -Depth 3))
+    $plain = @($script:pushed | Where-Object { $_.text -eq 'probe clip 81' })
+    Check ($plain.Count -ge 1 -and $plain[0].length -eq 13 -and $plain[0].concealed -eq $false) 'a copy did not push a clipboard event with its text and length'
+    $hidden = @($script:pushed | Where-Object { $_.concealed -eq $true })
+    Check ($hidden.Count -ge 1 -and $null -eq $hidden[0].PSObject.Properties['text'] -and $hidden[0].length -eq 17) 'an excluded copy did not push a text-less concealed event'
+    Check (-not $all.ToString().Contains('hunter2')) 'excluded clipboard text came back'
 
     # the typed text must never come back
     Check (-not $all.ToString().Contains($secret)) 'an answer contained the typed text'

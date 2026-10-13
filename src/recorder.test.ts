@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseConfig } from "./config.ts";
 import type { App, Element, Event, Raw } from "./events.ts";
-import type { FrontAnswer } from "./probe.ts";
-import { type ProbeLike, Recorder } from "./recorder.ts";
+import type { ClipboardChange, FrontAnswer, TreeAnswer } from "./probe.ts";
+import { outOf, type ProbeLike, Recorder } from "./recorder.ts";
 import type { Capturer } from "./screen.ts";
 
 const T0 = Date.UTC(2030, 5, 1, 12, 0, 0);
@@ -30,6 +30,8 @@ function setup(
   opts: {
     focused?: () => { element: Element | null } | null;
     at?: (x: number, y: number, timeoutMs?: number) => { element: Element | null } | null;
+    tree?: () => TreeAnswer | null;
+    ask?: (q: string) => Promise<string | null>;
   } = {},
 ) {
   const sessions = mkdtempSync(join(tmpdir(), "track-recorder-"));
@@ -37,6 +39,8 @@ function setup(
   let now = 1000;
   let front: FrontAnswer = { app: app("TextEdit", "com.apple.TextEdit", 10), window: win("Notes") };
   let shade = 0;
+  let still = false; // the screen stops changing
+  let onClip: (c: ClipboardChange) => void = () => {};
   let onRaw: (r: Raw) => void = () => {};
   const notes: string[] = [];
   const probe: ProbeLike = {
@@ -47,12 +51,16 @@ function setup(
     front: async () => front,
     focused: async () => (opts.focused ? opts.focused() : { element: field(false) }),
     perm: async () => ({ accessibility: true, screen: true, input: true }),
+    ...(opts.tree ? { tree: async () => (opts.tree as () => TreeAnswer | null)() } : {}),
+    watchClipboard: (fn) => {
+      onClip = fn;
+    },
     close: () => {},
   };
   const capturer: Capturer = {
     displays: () => [{ id: "1", x: 0, y: 0, width: 64, height: 36, scale: 1, primary: true }],
     grab: async () => {
-      shade += 40;
+      if (!still) shade += 40;
       return {
         display: "1",
         width: 64,
@@ -78,6 +86,7 @@ function setup(
     },
     displayAt: () => "1",
     notify: (m) => notes.push(m),
+    ...(opts.ask ? { ask: opts.ask } : {}),
     clock: { now: () => now, epoch: () => T0 + now - 1000 },
     timers: false,
     sleep: async () => {},
@@ -113,6 +122,15 @@ function setup(
     typeText,
     setFront: (f: FrontAnswer) => {
       front = f;
+    },
+    still: (v: boolean) => {
+      still = v;
+    },
+    copy: (c: ClipboardChange) => onClip(c),
+    file: (seg: string, name: string) => readFileSync(join(rec.journal.dir, seg, name), "utf8"),
+    click: (t: number, x = 50, y = 60) => {
+      raw({ type: "down", t, x, y, button: "left" });
+      raw({ type: "up", t: t + 20, x, y, button: "left" });
     },
   };
 }
@@ -360,5 +378,223 @@ describe("recorder", () => {
     const s = r.rec.status();
     expect(s).toMatchObject({ session: r.rec.journal.session, paused: null, probe: "running" });
     await r.rec.stop();
+  });
+});
+
+const node = (name: string) => ({
+  role: "button",
+  name,
+  x: 10,
+  y: 20,
+  width: 30,
+  height: 40,
+  depth: 1,
+});
+const tree = (...names: string[]): TreeAnswer => ({
+  nodes: names.map(node),
+  truncated: false,
+  ms: 5,
+});
+
+describe("recorder signal", () => {
+  it("an act carries what it did: screen, focus, window and dialog", async () => {
+    const r = setup();
+    r.click(100); // the fake screen changes on every grab
+    await r.rec.settled();
+    r.still(true);
+    const edit = app("TextEdit", "com.apple.TextEdit", 10);
+    r.setFront({ app: edit, window: win("Notes"), windows: 1 });
+    r.click(400);
+    r.setFront({
+      app: edit,
+      window: win("Notes"),
+      windows: 2,
+      dialog: { title: "Save?", text: "Keep your changes?", buttons: ["Don't Save", "Save"] },
+    });
+    await r.rec.settled();
+    r.click(800);
+    r.setFront({ app: app("Safari", "com.apple.Safari", 20), window: win("Docs") });
+    await r.rec.stop();
+    const clicks = r.events().filter((e) => e.kind === "click");
+    expect(clicks.map((e) => (e as { out?: unknown }).out)).toEqual([
+      { screen: true, focus: false, dialog: false, window: false },
+      { screen: false, focus: false, dialog: true, window: true },
+      { screen: false, focus: true, dialog: false, window: false },
+    ]);
+  });
+
+  it("outOf: an unknown side reads false", () => {
+    const f: FrontAnswer = { app: app("A", "a", 1), window: win("W"), windows: 1 };
+    expect(outOf(null, null, null, null)).toEqual({
+      screen: false,
+      focus: false,
+      dialog: false,
+      window: false,
+    });
+    expect(outOf(f, { app: f.app, window: f.window }, "00", null)).toMatchObject({
+      window: false,
+      screen: false,
+    });
+    expect(outOf(f, { ...f, app: app("B", "b", 2), windows: 3 }, null, null)).toMatchObject({
+      focus: true,
+      window: false,
+    });
+  });
+
+  it("a dialog in front is written once, with title, text and buttons", async () => {
+    const r = setup();
+    r.raw({ type: "move", t: 0, x: 1, y: 1 });
+    const dialog = {
+      title: "Delete?",
+      text: "This can't be undone.",
+      buttons: ["Cancel", "Delete"],
+    };
+    r.setFront({ app: app("Finder", "com.apple.finder", 5), window: win("Delete?"), dialog });
+    r.at(100);
+    await r.rec.frontTick();
+    r.at(1100);
+    await r.rec.frontTick();
+    r.setFront({ app: app("Finder", "com.apple.finder", 5), window: win("Delete?"), dialog: null });
+    r.at(2100);
+    await r.rec.frontTick();
+    r.setFront({ app: app("Finder", "com.apple.finder", 5), window: win("Delete?"), dialog });
+    r.at(3100);
+    await r.rec.frontTick();
+    await r.rec.stop();
+    const dialogs = r.events().filter((e) => e.kind === "dialog");
+    expect(dialogs.length).toBe(2);
+    expect(dialogs[0]).toMatchObject({ kind: "dialog", ...dialog, app: { name: "Finder" } });
+  });
+
+  it("trees: one after a focus change, at most once a second, the same tree once; acts name the latest", async () => {
+    let answer = tree("OK");
+    const r = setup({ tree: () => answer });
+    r.click(0);
+    await r.rec.settled();
+    await r.rec.treeTick();
+    await r.rec.settled();
+    r.click(100);
+    await r.rec.settled();
+    r.at(500);
+    await r.rec.treeTick(); // under a second since the last: waits
+    r.at(1200);
+    await r.rec.treeTick(); // the same tree: not written again
+    r.click(1300);
+    await r.rec.settled();
+    answer = tree("OK", "Cancel");
+    r.at(2400);
+    await r.rec.treeTick();
+    await r.rec.stop();
+    const ev = r.events();
+    expect(ev.filter((e) => e.kind === "tree").map((e) => (e as { tree: number }).tree)).toEqual([
+      0, 1,
+    ]);
+    const clicks = ev.filter((e) => e.kind === "click") as { tree?: number }[];
+    expect(clicks.map((c) => c.tree)).toEqual([undefined, 0, 0]);
+    expect(JSON.parse(r.file("000", "trees/1.json"))).toEqual({
+      nodes: [node("OK"), node("Cancel")],
+      truncated: false,
+      ms: 5,
+    });
+    expect(r.rec.status().trees).toBe(2);
+  });
+
+  it("tree names pass through secret redaction", async () => {
+    const r = setup({ tree: () => tree("Key", `token ghp_${"x1".repeat(15)}`) });
+    r.click(0);
+    await r.rec.settled();
+    await r.rec.treeTick();
+    await r.rec.stop();
+    const names = JSON.parse(r.file("000", "trees/0.json")).nodes.map(
+      (n: { name: string }) => n.name,
+    );
+    expect(names).toEqual(["Key", "token <redacted>"]);
+  });
+
+  it("no tree while an excluded app is in front", async () => {
+    const r = setup({ tree: () => tree("Vault item") });
+    r.setFront({ app: app("1Password", "com.1password.1password", 20), window: win("Vault") });
+    r.raw({ type: "move", t: 0, x: 1, y: 1 });
+    await r.rec.frontTick();
+    await r.rec.treeTick();
+    await r.rec.stop();
+    expect(r.events().some((e) => e.kind === "tree")).toBe(false);
+    expect(JSON.stringify(r.events())).not.toContain("Vault item");
+  });
+
+  it("clipboard: text redacted; none from a password field, a concealed copy or an excluded app", async () => {
+    let secure = false;
+    const r = setup({ focused: () => ({ element: field(secure) }) });
+    r.copy({ types: ["public.utf8-plain-text"], length: 5, text: "hello", concealed: false });
+    await r.rec.settled();
+    secure = true;
+    r.copy({ types: ["public.utf8-plain-text"], length: 7, text: "hunter2", concealed: false });
+    await r.rec.settled();
+    secure = false;
+    r.copy({ types: ["org.nspasteboard.ConcealedType"], length: 9, concealed: true });
+    await r.rec.settled();
+    r.setFront({ app: app("1Password", "com.1password.1password", 20), window: win("Vault") });
+    r.copy({ types: ["public.utf8-plain-text"], length: 8, text: "vaultpw1", concealed: false });
+    await r.rec.stop();
+    const clips = r.events().filter((e) => e.kind === "clipboard");
+    expect(clips).toEqual([
+      expect.objectContaining({
+        length: 5,
+        text: "hello",
+        redacted: false,
+        app: expect.anything(),
+      }),
+      expect.objectContaining({ length: 7, redacted: true }),
+      expect.objectContaining({ length: 9, redacted: true }),
+    ]);
+    expect(clips.some((c) => "text" in c && c.text !== "hello")).toBe(false);
+    expect(JSON.stringify(r.events())).not.toMatch(/hunter2|vaultpw1/);
+  });
+
+  it("Ctrl+Alt+Shift+T asks what you are doing; keys typed into the prompt are not input", async () => {
+    let reply: (v: string | null) => void = () => {};
+    const asked: string[] = [];
+    const r = setup({
+      ask: (q) => {
+        asked.push(q);
+        return new Promise((res) => {
+          reply = res;
+        });
+      },
+    });
+    const hot = (t: number) =>
+      r.raw({ type: "keydown", t, key: "t", mods: ["ctrl", "alt", "shift"] });
+    hot(100);
+    r.typeText(200, "fixing  the\nbuild");
+    reply("fixing  the\nbuild ");
+    await new Promise((res) => setImmediate(res));
+    hot(3000);
+    reply("");
+    await new Promise((res) => setImmediate(res));
+    hot(4000);
+    reply(null);
+    await new Promise((res) => setImmediate(res));
+    await r.rec.stop();
+    expect(asked).toEqual(["What are you doing?", "What are you doing?", "What are you doing?"]);
+    const ev = r.events();
+    expect(ev.filter((e) => e.kind === "task")).toEqual([
+      expect.objectContaining({ goal: "fixing the build", t: 100 }),
+      expect.objectContaining({ goal: "", done: true, t: 3000 }),
+    ]);
+    expect(ev.some((e) => e.kind === "text" || e.kind === "key")).toBe(false);
+  });
+
+  it("a page snapshot over 2 KB is stored as trees/<n>.txt and named by treeFile", async () => {
+    const r = setup();
+    const page = "heading Docs\n".repeat(400);
+    const base = { kind: "web", act: "snapshot", tab: 1, frame: 0, url: "https://x.test/" };
+    expect(r.rec.external({ ...base, tree: page })).toEqual({ written: true });
+    expect(r.rec.external({ ...base, tree: "small" })).toEqual({ written: true });
+    await r.rec.stop();
+    const [big, small] = r.events();
+    expect(big).toMatchObject({ kind: "web", treeFile: 0 });
+    expect(big).not.toHaveProperty("tree");
+    expect(small).toMatchObject({ tree: "small" });
+    expect(r.file("000", "trees/0.txt")).toBe(page);
   });
 });

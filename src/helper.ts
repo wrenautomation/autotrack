@@ -2,8 +2,10 @@
  * Client for a native helper child (helpers/mac/probe, helpers/win/probe.ps1): a long-lived
  * process, one JSON request per line on stdin, one answer per line on stdout, matched by id. An
  * answer that misses its timeout resolves `null` and is dropped by id when it shows up late. A
- * crashed helper restarts with backoff; a missing helper makes every call `null` at once. The
- * probe and the shots client are two children of the same helper, built on this.
+ * line with `event` and no id is something the helper saw by itself (a clipboard change) and goes
+ * to `onEvent`. A crashed helper restarts with backoff (`onStart` runs after each start, so a
+ * watch can be asked for again); a missing helper makes every call `null` at once. The probe and
+ * the shots client are two children of the same helper, built on this.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -66,6 +68,10 @@ export class HelperClient {
   readonly available: boolean;
   /** How many times the child has been started: answers from an earlier start are stale. */
   starts = 0;
+  /** Lines the helper pushed by itself: `{event: "<name>", …}`. */
+  onEvent: ((msg: Record<string, unknown> & { event: string }) => void) | null = null;
+  /** After every start, the first one included when set in time. */
+  onStart: (() => void) | null = null;
   private child: HelperChild | null = null;
   private nextId = 1;
   private pending = new Map<number, Pending>();
@@ -161,6 +167,7 @@ export class HelperClient {
       this.opts.log?.(`${name}: ${(err as Error | undefined)?.message ?? "error"}`);
       dead();
     });
+    this.onStart?.();
   }
 
   private scheduleRestart(): void {
@@ -179,13 +186,20 @@ export class HelperClient {
       this.buf = this.buf.slice(nl + 1);
       nl = this.buf.indexOf("\n");
       if (!line) continue;
-      let msg: { id?: unknown };
+      let msg: { id?: unknown; event?: unknown };
       try {
         msg = JSON.parse(line);
       } catch {
         continue;
       }
       if (typeof msg.id === "number") this.settle(msg.id, msg);
+      else if (typeof msg.event === "string" && this.onEvent) {
+        try {
+          this.onEvent(msg as Record<string, unknown> & { event: string });
+        } catch (e) {
+          this.opts.log?.(`${this.opts.name ?? "helper"}: ${msg.event}: ${(e as Error).message}`);
+        }
+      }
     }
   }
 }

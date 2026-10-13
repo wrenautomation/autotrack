@@ -3,6 +3,8 @@
  *
  *   <device>/<session>/session.json                  (put again whenever it changes, e.g. endedAt)
  *   <device>/<session>/<segment>/frames/<n>.jpg      (each deleted locally once put)
+ *   <device>/<session>/<segment>/trees/<n>.json.gz   (accessibility trees, `.txt.gz` for a web
+ *                                                     snapshot; each deleted locally once put)
  *   <device>/<session>/<segment>/events.jsonl.gz     (put last: the segment counts once it lands)
  *
  * A segment is taken only once `.done` is in it, and deleted locally after its events land. A
@@ -146,6 +148,14 @@ const framesIn = (segDir: string) => {
     .map((name) => ({ name, n: frameNo(name) }))
     .filter((x): x is { name: string; n: number } => x.n !== null)
     .sort((a, b) => a.n - b.n);
+};
+
+const treesIn = (segDir: string) => {
+  const dir = join(segDir, "trees");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => /^\d+\.(json|txt)$/.test(name))
+    .sort((a, b) => Number.parseInt(a, 10) - Number.parseInt(b, 10));
 };
 
 /** Bytes under a dir. */
@@ -352,13 +362,26 @@ export class DirShipper implements Shipper {
     prefix: string,
     put: (key: string, body: Uint8Array, type: string) => Promise<void>,
   ): Promise<void> {
-    const queue = framesIn(segDir);
+    const queue: { path: string; key: string; gzip: boolean }[] = [
+      ...framesIn(segDir).map((f) => ({
+        path: join(segDir, "frames", f.name),
+        key: `${prefix}/frames/${f.n}.jpg`,
+        gzip: false,
+      })),
+      ...treesIn(segDir).map((name) => ({
+        path: join(segDir, "trees", name),
+        key: `${prefix}/trees/${name}.gz`,
+        gzip: true,
+      })),
+    ];
     let stop = false;
     const worker = async () => {
       for (let f = queue.shift(); f && !stop; f = queue.shift()) {
-        const p = join(segDir, "frames", f.name);
+        const p = f.path;
         try {
-          await put(`${prefix}/frames/${f.n}.jpg`, readFileSync(p), "image/jpeg");
+          const body = readFileSync(p);
+          if (f.gzip) await put(f.key, gzipSync(body), "application/gzip");
+          else await put(f.key, body, "image/jpeg");
         } catch (e) {
           stop = true;
           throw e;

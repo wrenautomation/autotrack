@@ -70,6 +70,40 @@ const shipper = (
   });
 
 describe("DirShipper", () => {
+  it("puts trees gzipped after frames and before events, deleting each once put", async () => {
+    const dir = session("20261013T100000-abcd", [{ events: 2, frames: [0], done: true }]);
+    const trees = join(dir, "000", "trees");
+    mkdirSync(trees);
+    writeFileSync(join(trees, "10.json"), '{"nodes":[]}');
+    writeFileSync(join(trees, "2.txt"), "button Save");
+    writeFileSync(join(trees, "notes.tmp"), "x");
+    const m = memStore();
+    await shipper(m.store).ship(sessions);
+    expect(m.puts.map((p) => p.key.split("/").slice(2).join("/"))).toEqual([
+      "session.json",
+      "000/frames/0.jpg",
+      "000/trees/2.txt.gz",
+      "000/trees/10.json.gz",
+      "000/events.jsonl.gz",
+    ]);
+    expect(gunzipSync(m.puts[2]?.body ?? Buffer.alloc(0)).toString()).toBe("button Save");
+    expect(m.puts[2]?.type).toBe("application/gzip");
+    expect(existsSync(join(dir, "000"))).toBe(false);
+  });
+
+  it("a failed tree put keeps the trees not yet put and the events", async () => {
+    const dir = session("20261013T100000-abcd", [{ events: 2, frames: [], done: true }]);
+    const trees = join(dir, "000", "trees");
+    mkdirSync(trees);
+    writeFileSync(join(trees, "0.json"), "{}");
+    writeFileSync(join(trees, "1.json"), "{}");
+    const m = memStore(2); // session.json and tree 0 land, tree 1 fails
+    await shipper(m.store).ship(sessions);
+    expect(existsSync(join(trees, "0.json"))).toBe(false);
+    expect(existsSync(join(trees, "1.json"))).toBe(true);
+    expect(existsSync(join(dir, "000", "events.jsonl"))).toBe(true);
+  });
+
   it("puts session.json, frames, then events; deletes each closed segment; leaves open ones", async () => {
     const dir = session("20261013T100000-abcd", [
       { events: 3, frames: [0, 1], done: true },

@@ -54,7 +54,7 @@ describe("control", () => {
     server.close();
   });
 
-  it("many lines on one connection, a reply each in order; a line over 64 KB is refused", async () => {
+  it("many lines on one connection, a reply each in order; a line over 256 KB is refused", async () => {
     const data = tmp();
     const got: Request[] = [];
     const server = await serve(data, async (req) => {
@@ -85,9 +85,12 @@ describe("control", () => {
       { ok: false, error: "unknown op: nope" },
     ]);
     expect(got[0]).toEqual({ op: "web", event: web });
+    const snapshot = { ...web, tree: "t".repeat(100_000) }; // a page snapshot fits
+    const fits = await talk(`${JSON.stringify({ op: "web", event: snapshot })}\n`);
+    expect(JSON.parse(fits[0] as string)).toEqual({ ok: true, result: { written: true } });
     const big = await talk(`{"op":"web","event":{"kind":"web","x":"${"a".repeat(MAX_LINE)}"}}\n`);
     expect(JSON.parse(big[0] as string)).toMatchObject({ ok: false });
-    expect(got.length).toBe(2);
+    expect(got.length).toBe(3);
     server.close();
   });
 

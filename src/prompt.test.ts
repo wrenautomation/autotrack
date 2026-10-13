@@ -1,0 +1,33 @@
+import { describe, expect, it } from "vitest";
+import { promptAnswer, promptCommand } from "./prompt.ts";
+
+describe("task prompt", () => {
+  it("Mac: osascript with the question quoted and a give-up", () => {
+    const c = promptCommand('Say "hi" \\ now', "darwin");
+    expect(c?.cmd).toBe("osascript");
+    const script = (c?.args ?? []).filter((_, i) => i % 2 === 1).join("\n");
+    expect(script).toContain('display dialog "Say \\"hi\\" \\\\ now" default answer ""');
+    expect(script).toContain("giving up after 600");
+  });
+
+  it("Windows: a hidden STA PowerShell with the script encoded, quotes doubled", () => {
+    const c = promptCommand("What's up?", "win32");
+    expect(c?.cmd).toBe("powershell.exe");
+    expect(c?.args).toContain("-STA");
+    const script = Buffer.from(c?.args.at(-1) ?? "", "base64").toString("utf16le");
+    expect(script).toContain("$l.Text = 'What''s up?'");
+  });
+
+  it("no prompt elsewhere", () => {
+    expect(promptCommand("q", "linux")).toBeNull();
+  });
+
+  it("the answer: stdout on exit 0, null otherwise; base64 UTF-8 on Windows", () => {
+    expect(promptAnswer(0, "fixing the build\n", "darwin")).toBe("fixing the build");
+    expect(promptAnswer(0, "\n", "darwin")).toBe("");
+    expect(promptAnswer(1, "", "darwin")).toBeNull();
+    expect(promptAnswer(null, "", "darwin")).toBeNull();
+    const b64 = Buffer.from("café ✓", "utf8").toString("base64");
+    expect(promptAnswer(0, `${b64}\r\n`, "win32")).toBe("café ✓");
+  });
+});

@@ -6,7 +6,7 @@
  *   {"op":"stop"|"pause"|"resume"|"status"}   (the CLI; `cmd` works as `op`)
  *   {"op":"web","event":{"kind":"web"|"app",...}}   (the browser extension's native host)
  *
- * Replies: {"ok":true,"result":...} or {"ok":false,"error":"..."}. A line over 64 KB is refused
+ * Replies: {"ok":true,"result":...} or {"ok":false,"error":"..."}. A line over 256 KB is refused
  * and the connection closed.
  */
 import { createHash } from "node:crypto";
@@ -19,7 +19,7 @@ import { dataDir } from "./config.ts";
 export type Command = "stop" | "pause" | "resume" | "status";
 export type Request = { op: Command } | { op: "web"; event: unknown };
 
-export const MAX_LINE = 64 * 1024;
+export const MAX_LINE = 256 * 1024;
 const COMMANDS: string[] = ["stop", "pause", "resume", "status"];
 
 /**
