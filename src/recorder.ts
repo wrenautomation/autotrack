@@ -673,15 +673,18 @@ export class Recorder {
     );
   }
 
-  /** The task marker: ask what the person is doing; an empty answer marks the task done. */
-  private async task(): Promise<void> {
-    if (this.prompting || this.paused || !this.d.ask) return;
+  /**
+   * The task marker: ask what the person is doing; an empty answer marks the task done. Its t is
+   * when the answer came, so events written while the prompt was up stay in order.
+   */
+  async task(): Promise<void> {
+    if (this.prompting || this.paused || this.stopped || !this.d.ask) return;
     this.prompting = true;
     this.folder.flush();
-    const t = this.t(this.clock.now());
     try {
       const answer = await this.d.ask(TASK_QUESTION);
       if (answer === null || this.stopped || this.paused) return;
+      const t = this.t(this.clock.now());
       const goal = clip(answer.replace(/\s+/g, " ").trim(), TASK_GOAL_MAX);
       const e: Event = goal
         ? { kind: "task", goal, t, ts: this.ts(t) }

@@ -27,7 +27,7 @@ nothing from autobrowse; autobrowse keeps a hand-synced copy of the session type
 | privacy | `src/privacy.ts` | password fields, excluded apps, secret-shaped text, pause |
 | journal | `src/journal.ts` | session dir, 5-minute segments, `events.jsonl` + `frames/`, closed segment → `.done` |
 | ship | `src/ship.ts` | closed segments → S3 under the device's prefix, delete after put, local cap |
-| cli | `src/cli.ts` | `autotrack start|stop|pause|resume|status|ship|doctor|uninstall` |
+| cli | `src/cli.ts` | `autotrack start|stop|pause|resume|status|task|ship|doctor|uninstall` |
 | install | `install/install.sh`, `install.ps1` | one line, no Node needed: download the bundle, autostart, permissions |
 | bundle | `.github/workflows/track.yml` | per-OS bundle (portable Node + app + node_modules) as a GitHub Release asset, e2e on real Mac and Windows runners |
 | storage | `deploy/terraform/track.tf`, `autobrowse autotrack enroll` | bucket; one write-only IAM user per device |
@@ -311,8 +311,9 @@ Recorder (`src/`, `helpers/`):
   `GetClipboardSequenceNumber`). `text` ≤ 2,000 chars, through the same redaction; none from an
   excluded app or a secure field. The copy's source app is on `Base`; the next paste is a `key`
   (cmd/ctrl+v) or a `web` `paste`.
-- **Task marker (the person's own "why").** Ctrl+Alt+Shift+T opens a one-line prompt ("What are
-  you doing?"; Mac `osascript display dialog`, Windows an InputBox) and writes
+- **Task marker (the person's own "why").** Ctrl+Alt+Shift+T (or `autotrack task`) opens a
+  one-line prompt in front ("What are you doing?"; Mac `display dialog` run by System Events,
+  Windows a topmost box) and writes
   `{kind:"task", goal}`; an empty answer writes `{kind:"task", goal:"", done:true}`. Optional,
   never nags. The strongest label there is when it's given.
 
@@ -398,8 +399,12 @@ Where the build is more exact than the bullets above:
   element did not answer in 500 ms.
 - Task: the answer is trimmed, whitespace collapsed, at most 500 characters. Keys typed into the
   prompt are not recorded. Windows shows a small WinForms box rather than an InputBox: it can take
-  the foreground (an Alt tap lifts the background rule) and needs no VisualBasic assembly. The Mac
-  dialog comes from `osascript`, which on some setups opens behind the front app.
+  the foreground (an Alt tap lifts the background rule) and needs no VisualBasic assembly. On the
+  Mac, `osascript`'s own dialog can open behind the front app, so System Events shows it; the
+  first prompt asks the person once to let autotrack control System Events (Automation). The
+  task's `t` is when the answer came, so events written while the prompt was up stay in order.
+  `autotrack task` (control op `task`) opens the same prompt; the e2e opens it that way and
+  checks it is the front window on both OSes.
 - Order: focus, tree and clipboard events wait while an act that began before them is still
   folding (a text run, a held button), so `t` never goes backwards in `events.jsonl`.
 - The control socket takes lines up to 256 KB (was 64 KB) so a 30k-character snapshot, escaped,

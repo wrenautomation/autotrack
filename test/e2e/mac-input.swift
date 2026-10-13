@@ -1,6 +1,6 @@
 // E2E input driver (CI only; never run it on a machine someone is using). Posts real CGEvents:
 // presses Allow on the screen capture prompt if it is up, clicks TextEdit's window and types "hello" + Return, then clicks the test form's password box
-// (mac-form.swift), types the password, and clicks Submit.
+// (mac-form.swift), types the password, and clicks Submit. `--type <text>` only types text + Return.
 //
 //   swiftc -O -o mac-input mac-input.swift && ./mac-input /tmp/form.json
 import AppKit
@@ -30,7 +30,7 @@ let keys: [Character: CGKeyCode] = [
   "c": 0x08, "v": 0x09, "b": 0x0B, "q": 0x0C, "w": 0x0D, "e": 0x0E, "r": 0x0F, "y": 0x10,
   "t": 0x11, "1": 0x12, "2": 0x13, "3": 0x14, "4": 0x15, "6": 0x16, "5": 0x17, "9": 0x19,
   "7": 0x1A, "8": 0x1C, "0": 0x1D, "o": 0x1F, "u": 0x20, "i": 0x22, "p": 0x23, "l": 0x25,
-  "j": 0x26, "k": 0x28, "n": 0x2D, "m": 0x2E,
+  "j": 0x26, "k": 0x28, "n": 0x2D, "m": 0x2E, " ": 0x31,
 ]
 let returnKey: CGKeyCode = 0x24
 
@@ -46,6 +46,14 @@ func type(_ s: String) {
     guard let code = keys[ch] else { fatalError("no key code for \(ch)") }
     key(code)
   }
+}
+
+// `mac-input --type <text>`: type it and Return into whatever is in front (the task prompt), then stop.
+if CommandLine.arguments.count > 2, CommandLine.arguments[1] == "--type" {
+  type(CommandLine.arguments[2])
+  key(returnKey)
+  log("typed \(CommandLine.arguments[2]) + Return")
+  exit(0)
 }
 
 /// TextEdit's largest normal window, in global top-left points.

@@ -99,32 +99,60 @@ while [ ! -s "$work/form.json" ]; do
   [ $i -lt 100 ] || die "form did not come up: $(cat "$work/form.log")"
   sleep 0.2
 done
-# As its own launchd job, so its TCC identity is the driver binary (granted above), not this shell.
-cat >"$work/input.plist" <<EOF
+# The driver as its own launchd job, so its TCC identity is the driver binary (granted above), not
+# this shell. Arguments go to mac-input; waits up to a minute for it to exit.
+drive() {
+  args=""
+  for a in "$@"; do args="$args<string>$a</string>"; done
+  cat >"$work/input.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$label.e2e-input</string>
-  <key>ProgramArguments</key><array><string>$work/mac-input</string><string>$work/form.json</string></array>
+  <key>ProgramArguments</key><array><string>$work/mac-input</string>$args</array>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>$work/input.log</string>
   <key>StandardErrorPath</key><string>$work/input.log</string>
 </dict></plist>
 EOF
-launchctl bootstrap "gui/$uid" "$work/input.plist"
-i=0
-while [ $i -lt 120 ]; do
-  sleep 0.5
-  i=$((i + 1))
-  state=$(launchctl print "gui/$uid/$label.e2e-input" 2>/dev/null || true)
-  case $state in *"state = running"*) continue ;; esac
-  case $state in *"last exit code = "[0-9]*) break ;; esac
-done
-launchctl bootout "gui/$uid/$label.e2e-input" 2>/dev/null || true
+  launchctl bootstrap "gui/$uid" "$work/input.plist"
+  i=0
+  while [ $i -lt 120 ]; do
+    sleep 0.5
+    i=$((i + 1))
+    state=$(launchctl print "gui/$uid/$label.e2e-input" 2>/dev/null || true)
+    case $state in *"state = running"*) continue ;; esac
+    case $state in *"last exit code = "[0-9]*) break ;; esac
+  done
+  launchctl bootout "gui/$uid/$label.e2e-input" 2>/dev/null || true
+}
+drive "$work/form.json"
 cat "$work/input.log" || true
 [ -f "$work/form.json.done" ] && echo "form submitted" || echo "::warning::e2e: the form never saw Submit"
 sleep 2
+
+step "task prompt"
+# Opened through the control socket; the front window must be the prompt (the installed probe
+# says what is in front), then the driver types the answer into it.
+case ",$soft," in
+*,input,*) echo "::warning::e2e: no Accessibility or event posting on this runner: task prompt skipped" ;;
+*)
+  "$cli" task >/dev/null || die "autotrack task failed"
+  i=0
+  while :; do
+    fr=$(printf '{"id":1,"op":"front"}\n' | "$app/helpers/mac/probe" 2>/dev/null | head -1)
+    case $fr in *'"title":"autotrack"'*) break ;; esac
+    i=$((i + 1))
+    [ $i -lt 30 ] || die "the task prompt is not in front after 15 s: $fr"
+    sleep 0.5
+  done
+  echo "front: $fr"
+  drive --type "e2e task"
+  cat "$work/input.log" || true
+  sleep 2
+  ;;
+esac
 
 step "stop, ship"
 "$cli" stop

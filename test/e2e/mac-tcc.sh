@@ -1,6 +1,6 @@
 #!/bin/sh
-# CI only: grants Accessibility, Input Monitoring, Screen Recording and event posting to each path
-# given, by writing TCC.db (needs sudo and SIP off; GitHub's macOS images run with SIP off).
+# CI only: grants Accessibility, Input Monitoring, Screen Recording, event posting and Automation of
+# System Events to each path given, by writing TCC.db (needs sudo and SIP off; GitHub's macOS images run with SIP off).
 # Exit 0 when granted, 3 when it can't be (SIP on, no sudo): the e2e then skips those checks loudly.
 #
 #   sh test/e2e/mac-tcc.sh <path>...
@@ -21,6 +21,10 @@ for path in "$@"; do
   for service in kTCCServiceAccessibility kTCCServiceListenEvent kTCCServiceScreenCapture kTCCServicePostEvent; do
     sql="$sql INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier, flags, last_modified) VALUES ('$service', '$path', 1, 2, 4, 1, 'UNUSED', 0, $now);"
   done
+done
+# Automation of System Events (the task prompt runs its dialog there), for each path and osascript.
+for path in "$@" /usr/bin/osascript; do
+  sql="$sql INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAppleEvents', '$path', 1, 2, 3, 1, 0, 'com.apple.systemevents', 0, $now);"
 done
 
 status=0

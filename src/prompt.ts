@@ -1,6 +1,7 @@
 /**
- * The task marker's one-line prompt ("What are you doing?"): Mac `osascript display dialog`,
- * Windows a small WinForms box with OK and Cancel. Resolves the answer, "" for an empty OK, or
+ * The task marker's one-line prompt ("What are you doing?"), opened in front: Mac `display
+ * dialog` run by System Events (osascript itself may not take the front from a background
+ * process), Windows a small topmost WinForms box with OK and Cancel. Resolves the answer, "" for an empty OK, or
  * null for Cancel, a closed box, no prompt on this OS, or 10 minutes without an answer.
  */
 import { spawn } from "node:child_process";
@@ -17,8 +18,10 @@ export function promptCommand(
 ): { cmd: string; args: string[] } | null {
   if (platform === "darwin") {
     const script = [
+      'tell application "System Events"',
       "activate",
       `set r to display dialog "${as(question)}" default answer "" with title "autotrack" buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel" giving up after ${PROMPT_TIMEOUT_MS / 1000}`,
+      "end tell",
       "if gave up of r then error number -128",
       "return text returned of r",
     ];

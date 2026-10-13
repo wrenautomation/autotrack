@@ -3,7 +3,8 @@
  * recorder listens on a local socket (unix socket on Mac, named pipe on Windows): JSON lines in,
  * one JSON reply line per line out, as many as the client sends on one connection.
  *
- *   {"op":"stop"|"pause"|"resume"|"status"}   (the CLI; `cmd` works as `op`)
+ *   {"op":"stop"|"pause"|"resume"|"status"|"task"}   (the CLI; `cmd` works as `op`; `task`
+ *   opens the task prompt, as Ctrl+Alt+Shift+T does)
  *   {"op":"web","event":{"kind":"web"|"app",...}}   (the browser extension's native host)
  *
  * Replies: {"ok":true,"result":...} or {"ok":false,"error":"..."}. A line over 256 KB is refused
@@ -16,11 +17,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dataDir } from "./config.ts";
 
-export type Command = "stop" | "pause" | "resume" | "status";
+export type Command = "stop" | "pause" | "resume" | "status" | "task";
 export type Request = { op: Command } | { op: "web"; event: unknown };
 
 export const MAX_LINE = 256 * 1024;
-const COMMANDS: string[] = ["stop", "pause", "resume", "status"];
+const COMMANDS: string[] = ["stop", "pause", "resume", "status", "task"];
 
 /**
  * The socket or pipe for a data dir. Mac: `<data>/control.sock` (a tmpdir path when that is too

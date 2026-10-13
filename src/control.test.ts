@@ -96,6 +96,7 @@ describe("control", () => {
 
   it("parses ops; cmd is an alias", () => {
     expect(parseRequest('{"cmd":"stop"}')).toEqual({ op: "stop" });
+    expect(parseRequest('{"op":"task"}')).toEqual({ op: "task" });
     expect(parseRequest('{"op":"web","event":{"kind":"app"}}')).toEqual({
       op: "web",
       event: { kind: "app" },

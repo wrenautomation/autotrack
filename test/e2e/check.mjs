@@ -7,7 +7,8 @@
  * Hard checks: a session arrived, session.json has endedAt, events parse and are in time order,
  * the typed password never appears anywhere (events, session.json, trees). Signal: every act
  * carries `out`, trees arrived as `trees/<n>.json.gz` named by their events and never hold a value,
- * the driver's copy is a clipboard event. Checks that need an OS permission the runner may not
+ * the driver's copy is a clipboard event, the task prompt (opened in front by `autotrack task`)
+ * wrote the driver's answer and none of its keys became input. Checks that need an OS permission the runner may not
  * grant (input: typed "hello", clicks with an element role, Submit named, the redacted run; screen:
  * frames) turn into loud `::warning::` lines when named in --soft, never silent passes.
  * --mac: macOS secure input hides keystrokes in a password box from every event tap, so a missing
@@ -19,6 +20,7 @@ import { gunzipSync } from "node:zlib";
 
 const PASSWORD = "hunter2pw";
 const CLIP = "autotrack e2e clip 42";
+const TASK = "e2e task";
 const args = process.argv.slice(2);
 const opt = (name) => {
   const i = args.indexOf(name);
@@ -233,6 +235,17 @@ for (const c of clips)
 check(
   clips.some((c) => c.text === CLIP && c.redacted === false),
   `the driver's copy recorded as a clipboard event`,
+);
+const tasks = events.filter((e) => e.kind === "task");
+for (const t of tasks) console.log(`      task ${JSON.stringify(t.goal)}${t.done ? " done" : ""}`);
+check(
+  tasks.some((t) => t.goal === TASK),
+  "the answer typed into the task prompt recorded as a task event",
+  "input",
+);
+check(
+  !texts.some((t) => /task/.test(t.text ?? "")),
+  "keys typed into the task prompt are not recorded as text",
 );
 
 const redacted = texts.filter((t) => t.redacted);

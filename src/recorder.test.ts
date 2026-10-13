@@ -635,10 +635,27 @@ describe("recorder signal", () => {
     expect(asked).toEqual(["What are you doing?", "What are you doing?", "What are you doing?"]);
     const ev = r.events();
     expect(ev.filter((e) => e.kind === "task")).toEqual([
-      expect.objectContaining({ goal: "fixing the build", t: 100 }),
+      expect.objectContaining({ goal: "fixing the build", t: 200 + 16 * 30 }), // when answered
       expect.objectContaining({ goal: "", done: true, t: 3000 }),
     ]);
     expect(ev.some((e) => e.kind === "text" || e.kind === "key")).toBe(false);
+  });
+
+  it("task() opens the prompt as the hotkey does (the control socket's task op)", async () => {
+    const asked: string[] = [];
+    const r = setup({
+      ask: async (q) => {
+        asked.push(q);
+        return "e2e task";
+      },
+    });
+    r.at(500);
+    await r.rec.task();
+    await r.rec.stop();
+    expect(asked).toEqual(["What are you doing?"]);
+    expect(r.events()).toEqual([
+      expect.objectContaining({ kind: "task", goal: "e2e task", t: 500 }),
+    ]);
   });
 
   it("a page snapshot over 2 KB is stored as trees/<n>.txt and named by treeFile", async () => {

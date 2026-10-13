@@ -37,6 +37,7 @@ function Running { Native { & $cli status *> $null }; return ($LASTEXITCODE -eq 
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class Drive {
     [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr extra; }
     [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr extra; }
@@ -49,6 +50,13 @@ public static class Drive {
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+    public static string FrontTitle() {
+        StringBuilder s = new StringBuilder(256);
+        GetWindowTextW(GetForegroundWindow(), s, s.Capacity);
+        return s.ToString();
+    }
     [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int ht, bool repaint);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 
@@ -178,6 +186,23 @@ try {
     [Drive]::Click([int]$f.submit.x, [int]$f.submit.y)
     Start-Sleep -Milliseconds 1500
     if (Test-Path "$formFile.done") { Write-Host 'form submitted' } else { Write-Host '::warning::e2e: the form never saw Submit' }
+    Start-Sleep -Seconds 2
+
+    Step 'task prompt'
+    # Opened through the control socket; the foreground window must be the prompt, then the answer
+    # is typed into it.
+    Native { & $cli task }
+    if ($LASTEXITCODE -ne 0) { Die "autotrack task exited $LASTEXITCODE" }
+    $front = ''
+    for ($i = 0; $front -ne 'autotrack'; $i++) {
+        if ($i -gt 30) { Die "the task prompt is not in front after 15 s: '$front'" }
+        Start-Sleep -Milliseconds 500
+        $front = [Drive]::FrontTitle()
+    }
+    Write-Host "front: $front"
+    Start-Sleep -Milliseconds 300
+    [Drive]::Type('e2e task')
+    [Drive]::Key(0x0D) # Enter
     Start-Sleep -Seconds 2
 
     Step 'stop, ship'

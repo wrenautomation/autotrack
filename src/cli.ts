@@ -152,6 +152,7 @@ async function start(data: string): Promise<number> {
     const cmd = req.op;
     if (cmd === "pause") recorder.pause("cli");
     if (cmd === "resume") recorder.resume();
+    if (cmd === "task") void recorder.task();
     if (cmd === "stop") {
       setImmediate(() => void stop());
       return { stopping: true };
@@ -367,7 +368,7 @@ async function uninstallCmd(data: string, args: string[]): Promise<number> {
   });
 }
 
-const USAGE = "usage: autotrack start|stop|pause|resume|status|ship|doctor|uninstall";
+const USAGE = "usage: autotrack start|stop|pause|resume|status|task|ship|doctor|uninstall";
 
 export async function main(argv: string[]): Promise<number> {
   const cmd = argv[0];
@@ -379,6 +380,7 @@ export async function main(argv: string[]): Promise<number> {
     case "pause":
     case "resume":
     case "status":
+    case "task":
       return control(data, cmd);
     case "doctor":
       return doctor(data);
