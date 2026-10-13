@@ -12,10 +12,9 @@ UI element under it, and the screen before and after. It is the "every action tr
 play/pause (memory: play-pause-computer-agent): `autobrowse autotrack import` turns a session into a
 `Recording` that teach and compile already read.
 
-Lives in `autobrowse/track/`, its own package with its own `package.json`, apart from autobrowse's
-heavy deps (Playwright, AWS SDKs, Restate). Imports nothing from `autobrowse/src`; autobrowse
-imports nothing from it except the session format (copied types in `src/autotrack/`, checked equal by a
-test).
+Its own repo, apart from autobrowse's heavy deps (Playwright, AWS SDKs, Restate). It imports
+nothing from autobrowse; autobrowse keeps a hand-synced copy of the session types in
+`src/autotrack/types.ts`.
 
 ## Pieces
 
