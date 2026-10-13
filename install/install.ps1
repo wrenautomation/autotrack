@@ -123,10 +123,19 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the pro
 
         Quiet { & $node (Join-Path $app 'install\setup.mjs') }
         if ($LASTEXITCODE -ne 0) { Die 'setup failed' }
-        # config.json holds the device's key: this user only.
-        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-        Quiet { & icacls (Join-Path $data 'config.json') /inheritance:r /grant:r "*${sid}:(F)" | Out-Null }
-        if ($LASTEXITCODE -ne 0) { Die 'could not restrict config.json to this user' }
+        # config.json holds the device's key: this user only. The ACL is rebuilt rather than edited
+        # with icacls, which left SYSTEM and Administrators in on CI runners.
+        $cfgPath = Join-Path $data 'config.json'
+        try {
+            $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+            $sec = Get-Acl -LiteralPath $cfgPath
+            $sec.SetAccessRuleProtection($true, $false)
+            foreach ($rule in @($sec.Access)) { [void]$sec.RemoveAccessRuleAll($rule) }
+            $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))
+            Set-Acl -LiteralPath $cfgPath -AclObject $sec
+            $left = @((Get-Acl -LiteralPath $cfgPath).Access)
+            if ($left.Count -ne 1) { throw "$($left.Count) entries left" }
+        } catch { Die "could not restrict config.json to this user: $($_.Exception.Message)" }
 
         # The browser extension, unpacked at a stable path (Chrome and Edge reload unpacked
         # extensions from it on restart). Replaced on update. The manifest's fixed key keeps the id.

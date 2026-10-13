@@ -118,11 +118,11 @@ func axElement(_ v: CFTypeRef?) -> AXUIElement? {
 func msSince(_ t0: DispatchTime) -> Double { Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6 }
 
 // Ancestors nearest first, stopping before the window (the window is `front.window`).
-func ancestors(from parent: AXUIElement?, _ t0: DispatchTime) -> [[String: Any]] {
+func ancestors(from parent: AXUIElement?, _ t0: DispatchTime, wait: Float = axTimeout) -> [[String: Any]] {
     var out: [[String: Any]] = []
     var cur = parent
     while let el = cur, out.count < maxAncestors, msSince(t0) < walkBudgetMs {
-        AXUIElementSetMessagingTimeout(el, axTimeout)
+        AXUIElementSetMessagingTimeout(el, wait)
         guard let a = attrs(el, ancestorAttrs) else { break }
         let role = str(a[kAXRoleAttribute])
         if role.isEmpty || role == "AXWindow" || role == "AXApplication" || role == "AXSheet" { break }
@@ -167,9 +167,9 @@ func safeName(_ el: AXUIElement, role: String, _ name: String) -> String {
     return nameShowsValue(name, valuePrefix(el)) ? "" : name
 }
 
-func elementJSON(_ el: AXUIElement) -> Any {
+func elementJSON(_ el: AXUIElement, wait: Float = axTimeout) -> Any {
     let t0 = DispatchTime.now()
-    AXUIElementSetMessagingTimeout(el, axTimeout)
+    AXUIElementSetMessagingTimeout(el, wait)
     var pid: pid_t = 0
     if AXUIElementGetPid(el, &pid) == .success { enableWebAccessibility(pid) }
     guard let a = attrs(el, elementAttrs) else { return NSNull() }
@@ -185,7 +185,7 @@ func elementJSON(_ el: AXUIElement) -> Any {
         "x": r(p.x), "y": r(p.y), "width": r(s.width), "height": r(s.height),
         "secure": secure,
     ]
-    let path = ancestors(from: axElement(a[kAXParentAttribute]), t0)
+    let path = ancestors(from: axElement(a[kAXParentAttribute]), t0, wait: wait)
     if !path.isEmpty { out["path"] = path }
     for (key, value) in [
         "id": firstNonEmpty(a, ["AXIdentifier", "AXDOMIdentifier"]),
@@ -196,10 +196,14 @@ func elementJSON(_ el: AXUIElement) -> Any {
     return out
 }
 
-func opAt(_ x: Double, _ y: Double) -> Any {
+/// `wait`: the AX timeout for this ask. An app busy taking focus (a click that activates it) can
+/// miss 40 ms, so the client asks again with longer.
+func opAt(_ x: Double, _ y: Double, wait: Float = axTimeout) -> Any {
     var el: AXUIElement?
+    AXUIElementSetMessagingTimeout(systemWide, wait)
+    defer { AXUIElementSetMessagingTimeout(systemWide, axTimeout) }
     guard AXUIElementCopyElementAtPosition(systemWide, Float(x), Float(y), &el) == .success, let e = el else { return NSNull() }
-    return elementJSON(e)
+    return elementJSON(e, wait: wait)
 }
 
 func opFocused() -> Any {
@@ -260,7 +264,8 @@ func handle(_ req: [String: Any]) -> [String: Any] {
     var res: [String: Any] = ["id": req["id"] ?? NSNull()]
     switch req["op"] as? String {
     case "at":
-        if let x = num(req["x"]), let y = num(req["y"]) { res["element"] = opAt(x, y) } else { res["element"] = NSNull() }
+        let wait = num(req["wait"]).map { Float(min(max($0, 40), 2000) * 0.8 / 1000) } ?? axTimeout
+        if let x = num(req["x"]), let y = num(req["y"]) { res["element"] = opAt(x, y, wait: wait) } else { res["element"] = NSNull() }
     case "focused": res["element"] = opFocused()
     case "front": res.merge(opFront()) { $1 }
     case "perm": res.merge(opPerm()) { $1 }

@@ -125,7 +125,9 @@ Mac: `helpers/mac/probe.swift`, built by `swiftc -O` into a universal binary in 
 shipped in the Mac bundle (and built on first run if missing and `swiftc` exists). Windows:
 `helpers/win/probe.ps1`, Windows PowerShell 5.1 (on every Windows), `UIAutomationClient` +
 P/Invoke for the foreground window. Each answer under 50 ms p95; a timeout gives `null`, never a
-stall in the hook.
+stall in the hook. A click whose `at` missed is asked once more with `"wait":1000`: the client
+waits that long, and the Mac helper raises its AX timeout to match (an app busy taking focus
+misses 40 ms). Windows ignores `wait`.
 
 ## Shots protocol
 
