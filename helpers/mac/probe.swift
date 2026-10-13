@@ -216,20 +216,22 @@ func opFocused() -> Any {
     return elementJSON(e as! AXUIElement)
 }
 
-func opFront() -> [String: Any] {
-    // The AX focused application is live; NSWorkspace only updates while a run loop turns.
-    var app: NSRunningApplication?
+// The AX focused application is live; NSWorkspace only updates while the main run loop turns.
+// Main thread only: off it the AX ask fails and the NSWorkspace answer stays stale.
+func frontApp() -> NSRunningApplication? {
     var v: CFTypeRef?
     if AXUIElementCopyAttributeValue(systemWide, kAXFocusedApplicationAttribute as CFString, &v) == .success,
        let e = v, CFGetTypeID(e) == AXUIElementGetTypeID() {
         var pid: pid_t = 0
-        if AXUIElementGetPid(e as! AXUIElement, &pid) == .success { app = NSRunningApplication(processIdentifier: pid) }
+        if AXUIElementGetPid(e as! AXUIElement, &pid) == .success,
+           let app = NSRunningApplication(processIdentifier: pid) { return app }
     }
-    if app == nil {
-        RunLoop.current.run(mode: .default, before: Date())
-        app = NSWorkspace.shared.frontmostApplication
-    }
-    guard let app = app else { return ["app": NSNull(), "window": NSNull()] }
+    RunLoop.current.run(mode: .default, before: Date())
+    return NSWorkspace.shared.frontmostApplication
+}
+
+func opFront() -> [String: Any] {
+    guard let app = frontApp() else { return ["app": NSNull(), "window": NSNull()] }
     enableWebAccessibility(app.processIdentifier)
     let appJSON: [String: Any] = [
         "name": app.localizedName ?? "",
@@ -332,15 +334,11 @@ let treeNameMax = 200
 // every scroll or web area around them), at most `max` nodes and `depth` levels of emitted nodes,
 // stopping at `budgetMs`. Text-entry fields are leaves (their children are the typed text); their
 // names follow `safeName`. A secure field is marked `secure: true`.
-func opTree(max: Int, depth maxDepth: Int, budgetMs: Double) -> [String: Any] {
+// `app`: the front app's pid, found on the main thread by the caller.
+func opTree(app: pid_t, max: Int, depth maxDepth: Int, budgetMs: Double) -> [String: Any] {
     let t0 = DispatchTime.now()
     var nodes: [[String: Any]] = []
     var truncated = false
-    var app: pid_t = 0
-    var v: CFTypeRef?
-    if AXUIElementCopyAttributeValue(systemWide, kAXFocusedApplicationAttribute as CFString, &v) == .success,
-       let e = axElement(v) { AXUIElementGetPid(e, &app) }
-    if app == 0, let f = NSWorkspace.shared.frontmostApplication { app = f.processIdentifier }
     let ax = AXUIElementCreateApplication(app)
     AXUIElementSetMessagingTimeout(ax, 0.1)
     var w: CFTypeRef?
@@ -445,9 +443,10 @@ func handle(_ req: [String: Any]) -> [String: Any]? {
     case "tree":
         let max = Int(num(req["max"]) ?? 1500), depth = Int(num(req["depth"]) ?? 25)
         let budget = num(req["budgetMs"]) ?? 750
+        let app = frontApp()?.processIdentifier ?? 0
         treeQueue.async {
             autoreleasepool {
-                res.merge(opTree(max: max, depth: depth, budgetMs: budget)) { $1 }
+                res.merge(opTree(app: app, max: max, depth: depth, budgetMs: budget)) { $1 }
                 emit(res)
             }
         }

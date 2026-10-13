@@ -51,8 +51,9 @@ export const SEGMENT_TICK_MS = 30_000;
 export const SHIP_MS = 5 * 60_000;
 /**
  * A point act's element: asked at the click with this long to answer (only the act's own write
- * waits on it), and asked once more at once, with the helper waiting as long, when it comes back
- * null (a Mac app busy taking focus misses AX's 40 ms).
+ * waits on it; a later first ask could see the screen after the click). A null is asked once
+ * more when the act is written, with the helper waiting as long: on a Mac, AX misses 40 ms while
+ * the clicked app takes focus (more so a password field turning on secure input).
  */
 export const AT_MS = 1000;
 /** Trees: at most one a second. */
@@ -107,6 +108,8 @@ interface Ctx {
   target: Promise<AtAnswer | FocusedAnswer | null>;
   /** The latest tree written when the act began. */
   tree: number | null;
+  /** The act's point in the probe's coordinates, for asking again. */
+  at?: { x: number; y: number };
 }
 
 export interface Status {
@@ -444,15 +447,19 @@ export class Recorder {
 
   private begin(b: Begin, _t: number): Ctx {
     const c = this.coords();
-    const probe = this.d.probe;
     let target: Promise<AtAnswer | FocusedAnswer | null>;
+    let at: { x: number; y: number } | undefined;
     if (b.on === "point") {
-      const p = c.toPhysical(b.x, b.y);
-      target = probe
-        .at(p.x, p.y, AT_MS)
-        .then((r) => (r === null && probe.running ? probe.at(p.x, p.y, AT_MS, AT_MS) : r));
-    } else target = probe.focused();
-    return { before: this.screen.before(), front: this.front(), target, tree: this.lastTree };
+      at = c.toPhysical(b.x, b.y);
+      target = this.d.probe.at(at.x, at.y, AT_MS);
+    } else target = this.d.probe.focused();
+    return {
+      before: this.screen.before(),
+      front: this.front(),
+      target,
+      ...(at ? { at } : {}),
+      tree: this.lastTree,
+    };
   }
 
   private onAct(a: Folded<Ctx>): void {
@@ -492,6 +499,8 @@ export class Recorder {
     if (gateOf(this.gate, ...frontParts(front)) !== null) return { event: null, front };
     const c = this.coords();
     let target = await ctx.target;
+    if (target === null && ctx.at && this.d.probe.running)
+      target = await this.d.probe.at(ctx.at.x, ctx.at.y, AT_MS, AT_MS);
     let text: { text: string; redacted: boolean } | null = null;
     if (a.kind === "text") {
       if (target === null && this.d.probe.available)

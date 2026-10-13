@@ -225,6 +225,41 @@ const isNode = (n) =>
   if (perm.accessibility) check(tree.nodes.length > 0, "tree of the front window is empty");
 }
 
+// After an app switch, a tree is the new front window's. Its own helper, asked nothing else: an
+// earlier `at` or `front` on the main thread hid a stale front app here once.
+// TextEdit is quit after only if this test started it.
+{
+  const { execFileSync } = await import("node:child_process");
+  const fresh = spawn(join(dirname(fileURLToPath(import.meta.url)), "probe"), {
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  const lines = createInterface({ input: fresh.stdout })[Symbol.asyncIterator]();
+  const freshAsk = async (req) => {
+    fresh.stdin.write(`${JSON.stringify({ id: 1, ...req })}\n`);
+    return JSON.parse((await lines.next()).value);
+  };
+  const treeReq = { op: "tree", max: 1500, depth: 25, budgetMs: 750 };
+  let running = true;
+  try {
+    execFileSync("pgrep", ["-x", "TextEdit"]);
+  } catch {
+    running = false;
+  }
+  await freshAsk(treeReq);
+  execFileSync("open", ["-a", "TextEdit"]);
+  await new Promise((r) => setTimeout(r, 2500));
+  const tree = await freshAsk(treeReq);
+  const fr = await freshAsk({ op: "front" });
+  fresh.kill();
+  if (perm.accessibility && fr.app?.id === "com.apple.TextEdit" && fr.window)
+    check(
+      tree.nodes?.[0]?.role === "window" && tree.nodes[0].name === fr.window.title,
+      "after an app switch, the tree is the new front window's",
+    );
+  else console.log(`app switch: front is ${fr.app?.id}, check skipped`);
+  if (!running) execFileSync("osascript", ["-e", 'quit application "TextEdit"']);
+}
+
 // A dialog in front: `front` says so, with its title, text and buttons; the tree has them too.
 {
   const dlg = spawn(
