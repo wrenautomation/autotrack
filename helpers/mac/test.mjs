@@ -247,7 +247,13 @@ const isNode = (n) =>
   }
   await freshAsk(treeReq);
   execFileSync("open", ["-a", "TextEdit"]);
-  await new Promise((r) => setTimeout(r, 2500));
+  // Wait for it in front (10 s at most), asked of lsappinfo so the helper's run loop stays still.
+  const inFront = () =>
+    execFileSync("sh", ["-c", 'lsappinfo info -only bundleid "$(lsappinfo front)"'], {
+      encoding: "utf8",
+    }).includes("com.apple.TextEdit");
+  for (let i = 0; i < 50 && !inFront(); i++) await new Promise((r) => setTimeout(r, 200));
+  await new Promise((r) => setTimeout(r, 1000)); // its window settles
   const tree = await freshAsk(treeReq);
   const fr = await freshAsk({ op: "front" });
   fresh.kill();
