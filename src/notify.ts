@@ -32,7 +32,7 @@ export function notifyCommand(
   return null;
 }
 
-export function notify(body: string, title = "wren-track"): void {
+export function notify(body: string, title = "autotrack"): void {
   const c = notifyCommand(title, body);
   if (!c) return;
   try {

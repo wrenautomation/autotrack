@@ -101,25 +101,25 @@ describe("control", () => {
   });
 
   it("the native host finds the recorder from the environment alone", () => {
-    expect(recorderPath({ WREN_TRACK_DIR: "/d" }, "darwin")).toBe("/d/control.sock");
+    expect(recorderPath({ AUTOTRACK_DIR: "/d" }, "darwin")).toBe("/d/control.sock");
     expect(recorderPath({ LOCALAPPDATA: "C:\\Users\\a\\AppData\\Local" }, "win32")).toBe(
-      controlPath("C:\\Users\\a\\AppData\\Local\\wren-track", "win32"),
+      controlPath("C:\\Users\\a\\AppData\\Local\\autotrack", "win32"),
     );
   });
 
   it("socket paths: a pipe on Windows, short enough on Mac", () => {
-    expect(controlPath("C:\\Users\\a\\AppData\\Local\\wren-track", "win32")).toMatch(
-      /^\\\\\.\\pipe\\wren-track-[0-9a-f]{12}$/,
+    expect(controlPath("C:\\Users\\a\\AppData\\Local\\autotrack", "win32")).toMatch(
+      /^\\\\\.\\pipe\\autotrack-[0-9a-f]{12}$/,
     );
     expect(controlPath(`/tmp/${"x".repeat(120)}`, "darwin").length).toBeLessThan(104);
   });
 
   it("notifications per OS", () => {
-    expect(notifyCommand("wren-track", 'Say "hi"', "darwin")).toEqual({
+    expect(notifyCommand("autotrack", 'Say "hi"', "darwin")).toEqual({
       cmd: "osascript",
-      args: ["-e", 'display notification "Say \\"hi\\"" with title "wren-track"'],
+      args: ["-e", 'display notification "Say \\"hi\\"" with title "autotrack"'],
     });
-    expect(notifyCommand("wren-track", "it's on", "win32")?.args.at(-1)).toContain("it''s on");
+    expect(notifyCommand("autotrack", "it's on", "win32")?.args.at(-1)).toContain("it''s on");
     expect(notifyCommand("a", "b", "linux")).toBeNull();
   });
 });

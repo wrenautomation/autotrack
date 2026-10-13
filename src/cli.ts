@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * wren-track start|stop|pause|resume|status|doctor (ship and uninstall come with packaging).
+ * autotrack start|stop|pause|resume|status|doctor (ship and uninstall come with packaging).
  * `start` runs in the foreground; the login item runs it. The others talk to it over the
  * control socket.
  */
@@ -109,7 +109,7 @@ async function start(data: string): Promise<number> {
   mkdirSync(data, { recursive: true });
   const held = lock(data);
   if (!held.ok) {
-    console.error(`wren-track is already running (pid ${held.pid})`);
+    console.error(`autotrack is already running (pid ${held.pid})`);
     return 1;
   }
   const log = logger(data);
@@ -156,7 +156,7 @@ async function start(data: string): Promise<number> {
 async function control(data: string, cmd: Command): Promise<number> {
   const r = await send(data, cmd);
   if (r === null) {
-    console.error("wren-track is not running");
+    console.error("autotrack is not running");
     return 1;
   }
   console.log(JSON.stringify(r, null, 2));
@@ -201,7 +201,7 @@ async function measure(data: string): Promise<{ cpuPct: number; rssMb: number; o
       return { cpuPct, rssMb: second.rssMb, of: `running recorder (pid ${first.pid})` };
     }
   }
-  const tmp = mkdtempSync(join(tmpdir(), "wren-track-doctor-"));
+  const tmp = mkdtempSync(join(tmpdir(), "autotrack-doctor-"));
   const quiet = () => {};
   const recorder = await openRecorder(tmp, loadConfig(data), {
     notify: false,
@@ -235,7 +235,7 @@ async function doctor(data: string): Promise<number> {
     console.log(`${ok(good)} ${msg}`);
   };
   console.log(
-    `wren-track ${VERSION}, node ${process.version}, ${process.platform} ${osVersion()} ${arch()}`,
+    `autotrack ${VERSION}, node ${process.version}, ${process.platform} ${osVersion()} ${arch()}`,
   );
   const config = loadConfig(data, (m) => line(false, m));
   console.log(`     data ${data}`);
@@ -298,7 +298,7 @@ function relaunch(): Promise<number> | null {
   return new Promise((resolve) => child.on("exit", (code) => resolve(code ?? 1)));
 }
 
-const USAGE = "usage: wren-track start|stop|pause|resume|status|ship|doctor|uninstall";
+const USAGE = "usage: autotrack start|stop|pause|resume|status|ship|doctor|uninstall";
 
 export async function main(argv: string[]): Promise<number> {
   const cmd = argv[0];
@@ -315,7 +315,7 @@ export async function main(argv: string[]): Promise<number> {
       return (entry && relaunch()) || doctor(data);
     case "ship":
     case "uninstall":
-      console.error(`wren-track ${cmd}: not built yet`);
+      console.error(`autotrack ${cmd}: not built yet`);
       return 2;
     default:
       console.error(USAGE);

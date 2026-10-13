@@ -1,2 +1,6 @@
 # Built by helpers/mac/build.sh
 helpers/mac/probe
+node_modules/
+dist/
+*.log
+*.pem

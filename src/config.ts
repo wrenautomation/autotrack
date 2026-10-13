@@ -76,12 +76,12 @@ export function dataDir(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  if (env.WREN_TRACK_DIR) return env.WREN_TRACK_DIR;
+  if (env.AUTOTRACK_DIR) return env.AUTOTRACK_DIR;
   const join = platform === "win32" ? win32.join : posix.join;
   if (platform === "win32")
-    return join(env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "wren-track");
-  if (platform === "darwin") return join(homedir(), "Library", "Application Support", "wren-track");
-  return join(env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "wren-track");
+    return join(env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "autotrack");
+  if (platform === "darwin") return join(homedir(), "Library", "Application Support", "autotrack");
+  return join(env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "autotrack");
 }
 
 export const sessionsDir = (data: string) => nativeJoin(data, "sessions");

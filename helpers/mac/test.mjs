@@ -73,9 +73,9 @@ if (!perm.accessibility) console.log("SKIPPED element checks: Accessibility not 
 else check(hits > 0, "no `at` hit anywhere with Accessibility granted");
 check(Number(p(0.95)) < 50, `p95 ${p(0.95)} ms is not under 50 ms`);
 
-// Optional: WREN_TEST_CHROME=1 opens an isolated Chrome on fixtures/web-button.html and waits for the
+// Optional: AUTOTRACK_TEST_CHROME=1 opens an isolated Chrome on fixtures/web-button.html and waits for the
 // probe to see the page's button (role, name, id, ancestors) - proves AXManualAccessibility works.
-if (process.env.WREN_TEST_CHROME) {
+if (process.env.AUTOTRACK_TEST_CHROME) {
   const { mkdtempSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const dir = mkdtempSync(join(tmpdir(), "probe-chrome-"));

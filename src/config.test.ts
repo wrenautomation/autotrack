@@ -41,10 +41,10 @@ describe("config", () => {
   });
 
   it("data dir per OS, env wins", () => {
-    expect(dataDir({ WREN_TRACK_DIR: "/x" }, "darwin")).toBe("/x");
+    expect(dataDir({ AUTOTRACK_DIR: "/x" }, "darwin")).toBe("/x");
     expect(dataDir({ LOCALAPPDATA: "C:\\Users\\a\\AppData\\Local" }, "win32")).toMatch(
-      /wren-track$/,
+      /autotrack$/,
     );
-    expect(dataDir({}, "darwin")).toMatch(/Library\/Application Support\/wren-track$/);
+    expect(dataDir({}, "darwin")).toMatch(/Library\/Application Support\/autotrack$/);
   });
 });

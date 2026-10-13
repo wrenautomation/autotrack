@@ -1,4 +1,4 @@
-// wren-track probe (Mac): long-lived helper. One JSON request per line on stdin, one answer per
+// autotrack probe (Mac): long-lived helper. One JSON request per line on stdin, one answer per
 // line on stdout. Ops: at, front, focused, perm. See designs/2026-10-13-track.md "Probe protocol".
 // Never returns an element's value. Coordinates: global points, origin top-left (same as uiohook).
 // Elements also carry path (ancestors up to the window), id, cls, url, help; each omitted when empty.
@@ -62,7 +62,7 @@ func r(_ d: CGFloat) -> Int { Int(d.rounded()) }
 var enabledPids = Set<pid_t>()
 let chromiumIds = ["com.google.Chrome", "com.microsoft.edgemac", "com.brave.Browser", "com.operasoftware.",
                    "company.thebrowser.Browser", "com.vivaldi."]
-let noEnhance = ProcessInfo.processInfo.environment["WREN_PROBE_NO_ENHANCE"] != nil  // for before/after measuring
+let noEnhance = ProcessInfo.processInfo.environment["AUTOTRACK_PROBE_NO_ENHANCE"] != nil  // for before/after measuring
 
 func isChromiumBased(_ app: NSRunningApplication) -> Bool {
     if let id = app.bundleIdentifier, chromiumIds.contains(where: { id.hasPrefix($0) }) { return true }

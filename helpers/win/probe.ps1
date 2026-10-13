@@ -1,4 +1,4 @@
-# wren-track probe (Windows): long-lived helper. One JSON request per line on stdin, one answer per
+# autotrack probe (Windows): long-lived helper. One JSON request per line on stdin, one answer per
 # line on stdout. Ops: at, front, focused, perm. See designs/2026-10-13-track.md "Probe protocol".
 # Windows PowerShell 5.1 syntax only. Run: powershell -NoProfile -ExecutionPolicy Bypass -File probe.ps1
 #
@@ -21,7 +21,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class WrenNative {
+public static class AutotrackNative {
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -84,7 +84,7 @@ public static class WrenNative {
 '@
 
 # Before UIA loads, so its coordinates come back physical.
-[void][WrenNative]::EnableDpiAwareness()
+[void][AutotrackNative]::EnableDpiAwareness()
 Add-Type -AssemblyName WindowsBase, UIAutomationClient, UIAutomationTypes
 
 function ConvertTo-Rounded([double]$v) {
@@ -154,10 +154,10 @@ function Get-ElementJson($raw) {
 }
 
 function Get-FrontJson {
-    $h = [WrenNative]::Foreground()
+    $h = [AutotrackNative]::Foreground()
     if ($h -eq [IntPtr]::Zero) { return @{ app = $null; window = $null } }
-    $procId = [WrenNative]::Pid($h)
-    $path = [WrenNative]::ImagePath($procId)
+    $procId = [AutotrackNative]::Pid($h)
+    $path = [AutotrackNative]::ImagePath($procId)
     if ($path) {
         $name = [System.IO.Path]::GetFileNameWithoutExtension($path)
     } else {
@@ -165,9 +165,9 @@ function Get-FrontJson {
     }
     $app = [ordered]@{ name = [string]$name; id = [string]$path; pid = [int]$procId }
     $window = $null
-    $b = [WrenNative]::Bounds($h)
+    $b = [AutotrackNative]::Bounds($h)
     if ($null -ne $b) {
-        $window = [ordered]@{ title = [WrenNative]::Title($h); x = $b[0]; y = $b[1]; width = $b[2]; height = $b[3] }
+        $window = [ordered]@{ title = [AutotrackNative]::Title($h); x = $b[0]; y = $b[1]; width = $b[2]; height = $b[3] }
     }
     return @{ app = $app; window = $window }
 }

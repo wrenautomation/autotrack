@@ -24,14 +24,14 @@ const COMMANDS: string[] = ["stop", "pause", "resume", "status"];
 
 /**
  * The socket or pipe for a data dir. Mac: `<data>/control.sock` (a tmpdir path when that is too
- * long). Windows: `\\.\pipe\wren-track-<first 12 hex of sha256(data)>`.
+ * long). Windows: `\\.\pipe\autotrack-<first 12 hex of sha256(data)>`.
  */
 export function controlPath(data: string, platform: NodeJS.Platform = process.platform): string {
   const tag = createHash("sha256").update(data).digest("hex").slice(0, 12);
-  if (platform === "win32") return `\\\\.\\pipe\\wren-track-${tag}`;
+  if (platform === "win32") return `\\\\.\\pipe\\autotrack-${tag}`;
   const path = join(data, "control.sock");
   // Unix socket paths cap near 104 bytes on Mac.
-  return Buffer.byteLength(path) < 100 ? path : join(tmpdir(), `wren-track-${tag}.sock`);
+  return Buffer.byteLength(path) < 100 ? path : join(tmpdir(), `autotrack-${tag}.sock`);
 }
 
 /** The running recorder's socket or pipe for this user: what the native host connects to. */
