@@ -73,7 +73,7 @@ describe("probe client", () => {
 
   it("an at asked with longer tells the helper to wait as long", async () => {
     const { probe, child } = setup();
-    void probe.at(1, 2, 1000);
+    void probe.at(1, 2, 1000, 1000);
     await tick();
     expect(child().requests[0]).toEqual({ id: 1, op: "at", x: 1, y: 2, wait: 1000 });
     probe.close();

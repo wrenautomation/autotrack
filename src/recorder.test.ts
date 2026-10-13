@@ -29,7 +29,12 @@ const field = (secure: boolean): Element => ({
 function setup(
   opts: {
     focused?: () => { element: Element | null } | null;
-    at?: (x: number, y: number, timeoutMs?: number) => { element: Element | null } | null;
+    at?: (
+      x: number,
+      y: number,
+      timeoutMs?: number,
+      waitMs?: number,
+    ) => { element: Element | null } | null;
     tree?: () => TreeAnswer | null;
     ask?: (q: string) => Promise<string | null>;
   } = {},
@@ -46,8 +51,10 @@ function setup(
   const probe: ProbeLike = {
     available: true,
     running: true,
-    at: async (x, y, ms) =>
-      opts.at ? opts.at(x, y, ms) : { element: { ...field(false), role: "button", name: "OK" } },
+    at: async (x, y, ms, wait) =>
+      opts.at
+        ? opts.at(x, y, ms, wait)
+        : { element: { ...field(false), role: "button", name: "OK" } },
     front: async () => front,
     focused: async () => (opts.focused ? opts.focused() : { element: field(false) }),
     perm: async () => ({ accessibility: true, screen: true, input: true }),
@@ -153,11 +160,11 @@ describe("recorder", () => {
     expect(ts).toEqual([...ts].sort((x, y) => x - y));
   });
 
-  it("a click whose element misses 50 ms asks once more, with longer", async () => {
-    const asks: (number | undefined)[] = [];
+  it("a click's element gets 1 s; a null is asked once more with the helper waiting", async () => {
+    const asks: [number | undefined, number | undefined][] = [];
     const r = setup({
-      at: (_x, _y, ms) => {
-        asks.push(ms);
+      at: (_x, _y, ms, wait) => {
+        asks.push([ms, wait]);
         return asks.length === 1
           ? null
           : { element: { ...field(false), role: "textarea", name: "" } };
@@ -167,7 +174,10 @@ describe("recorder", () => {
     r.raw({ type: "up", t: 150, x: 50, y: 60, button: "left" });
     await r.rec.settled();
     await r.rec.stop();
-    expect(asks).toEqual([undefined, 1000]);
+    expect(asks).toEqual([
+      [1000, undefined],
+      [1000, 1000],
+    ]);
     expect(r.events()[0]).toMatchObject({ kind: "click", element: { role: "textarea" } });
   });
 

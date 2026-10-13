@@ -49,8 +49,12 @@ export const FRONT_POLL_MS = 1000;
 export const IDLE_TICK_MS = 2000;
 export const SEGMENT_TICK_MS = 30_000;
 export const SHIP_MS = 5 * 60_000;
-/** A point act whose element did not answer in 50 ms asks once more with this long. */
-export const AT_RETRY_MS = 1000;
+/**
+ * A point act's element: asked at the click with this long to answer (only the act's own write
+ * waits on it), and asked once more at once, with the helper waiting as long, when it comes back
+ * null (a Mac app busy taking focus misses AX's 40 ms).
+ */
+export const AT_MS = 1000;
 /** Trees: at most one a second. */
 export const TREE_MIN_MS = 1000;
 /** An incoming `tree` string over this many bytes is stored as `trees/<n>.txt`. */
@@ -64,7 +68,7 @@ export const TASK_GOAL_MAX = 500;
 export interface ProbeLike {
   readonly available: boolean;
   readonly running: boolean;
-  at(x: number, y: number, timeoutMs?: number): Promise<AtAnswer | null>;
+  at(x: number, y: number, timeoutMs?: number, waitMs?: number): Promise<AtAnswer | null>;
   front(): Promise<FrontAnswer | null>;
   focused(timeoutMs?: number): Promise<FocusedAnswer | null>;
   perm(timeoutMs?: number): Promise<PermAnswer | null>;
@@ -101,8 +105,6 @@ interface Ctx {
   before: Promise<Frame | null>;
   front: Promise<FrontAnswer | null>;
   target: Promise<AtAnswer | FocusedAnswer | null>;
-  /** The act's point in the probe's coordinates, for asking again. */
-  at?: { x: number; y: number };
   /** The latest tree written when the act began. */
   tree: number | null;
 }
@@ -442,19 +444,15 @@ export class Recorder {
 
   private begin(b: Begin, _t: number): Ctx {
     const c = this.coords();
+    const probe = this.d.probe;
     let target: Promise<AtAnswer | FocusedAnswer | null>;
-    let at: { x: number; y: number } | undefined;
     if (b.on === "point") {
-      at = c.toPhysical(b.x, b.y);
-      target = this.d.probe.at(at.x, at.y);
-    } else target = this.d.probe.focused();
-    return {
-      before: this.screen.before(),
-      front: this.front(),
-      target,
-      ...(at ? { at } : {}),
-      tree: this.lastTree,
-    };
+      const p = c.toPhysical(b.x, b.y);
+      target = probe
+        .at(p.x, p.y, AT_MS)
+        .then((r) => (r === null && probe.running ? probe.at(p.x, p.y, AT_MS, AT_MS) : r));
+    } else target = probe.focused();
+    return { before: this.screen.before(), front: this.front(), target, tree: this.lastTree };
   }
 
   private onAct(a: Folded<Ctx>): void {
@@ -494,9 +492,6 @@ export class Recorder {
     if (gateOf(this.gate, ...frontParts(front)) !== null) return { event: null, front };
     const c = this.coords();
     let target = await ctx.target;
-    // The first ask into an app the probe has not talked to yet can miss 50 ms: once more, longer.
-    if (target === null && ctx.at && this.d.probe.running)
-      target = await this.d.probe.at(ctx.at.x, ctx.at.y, AT_RETRY_MS);
     let text: { text: string; redacted: boolean } | null = null;
     if (a.kind === "text") {
       if (target === null && this.d.probe.available)

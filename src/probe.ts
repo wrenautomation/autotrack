@@ -90,9 +90,9 @@ export class Probe extends HelperClient {
     super({ ...opts, name: "probe" });
   }
 
-  /** With `timeoutMs`, the helper also waits on a slow app that long (`wait`). */
-  at(x: number, y: number, timeoutMs?: number): Promise<AtAnswer | null> {
-    const p = { x: Math.round(x), y: Math.round(y), ...(timeoutMs ? { wait: timeoutMs } : {}) };
+  /** `waitMs`: the helper also waits on a slow app that long (Mac AX timeout). */
+  at(x: number, y: number, timeoutMs?: number, waitMs?: number): Promise<AtAnswer | null> {
+    const p = { x: Math.round(x), y: Math.round(y), ...(waitMs ? { wait: waitMs } : {}) };
     return this.call("at", p, timeoutMs);
   }
   front(): Promise<FrontAnswer | null> {
