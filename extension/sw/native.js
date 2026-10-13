@@ -65,8 +65,8 @@ export class Native {
       this.dropped++;
       return;
     }
-    // The recorder refuses control lines over 64 KB.
-    if (JSON.stringify(ev).length > 60000) {
+    // The recorder refuses control lines over 256 KB.
+    if (JSON.stringify(ev).length > 250_000) {
       this.dropped++;
       return;
     }

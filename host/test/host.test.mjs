@@ -181,14 +181,14 @@ describe("relay", () => {
     rec.server.close();
   });
 
-  it("drops an event that would exceed the 64 KB control line", async () => {
+  it("drops an event that would exceed the 256 KB control line", async () => {
     const path = join(dir, "c.sock");
     const rec = await fakeRecorder(path);
     const h = host(path);
     await sleep(50);
     h.send({
       events: [
-        { kind: "app", detail: "x".repeat(70_000) },
+        { kind: "app", detail: "x".repeat(270_000) },
         { kind: "web", ts: 5 },
       ],
     });

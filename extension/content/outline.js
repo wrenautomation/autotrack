@@ -15,7 +15,7 @@
  * walked, iframes are not.
  *
  * Bounded: ≤ 30,000 characters, ≤ 48,000 bytes once JSON-escaped (the recorder refuses control
- * lines over 64 KB), ≤ 10,000 elements, ≤ 100 ms. When a bound hits, the outline ends there.
+ * lines over 256 KB), ≤ 10,000 elements, ≤ 100 ms. When a bound hits, the outline ends there.
  *
  * Classic script; sets `globalThis.__autotrack.outline`. Needs redact.js and hints.js first.
  */

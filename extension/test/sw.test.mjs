@@ -123,7 +123,7 @@ describe("native link", () => {
 
   it("drops an event too big for one control line", () => {
     const { n, ports, advance } = rig();
-    n.push({ kind: "app", detail: "x".repeat(70_000) });
+    n.push({ kind: "app", detail: "x".repeat(270_000) });
     advance(200);
     expect(ports[0].posted).toEqual([]);
     expect(n.dropped).toBe(1);

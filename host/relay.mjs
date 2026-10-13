@@ -11,7 +11,7 @@
  */
 import { Decoder, encode } from "./framing.mjs";
 
-export const MAX_LINE = 64 * 1024; // the recorder closes a connection on a longer line
+export const MAX_LINE = 256 * 1024; // src/control.ts MAX_LINE: the recorder closes a connection on a longer line
 const PENDING_MAX = 200;
 
 /**
