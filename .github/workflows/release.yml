@@ -1,0 +1,68 @@
+name: release
+
+# Push a tag like v0.1.0 (matching package.json) to build the three bundles on their own runners and
+# publish them with SHA256SUMS as a GitHub Release. The installers fetch releases/latest.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    name: bundle ${{ matrix.target }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: windows-latest, target: win32-x64, file: autotrack-win32-x64.zip }
+          - { os: macos-latest, target: darwin-arm64, file: autotrack-darwin-arm64.tar.gz }
+          - { os: macos-15-intel, target: darwin-x64, file: autotrack-darwin-x64.tar.gz }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag matches package.json
+        shell: bash
+        run: |
+          v=$(node -p 'require("./package.json").version')
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME but package.json says $v"; exit 1; }
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/bundle.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.target }}
+          path: |
+            bundles/${{ matrix.file }}
+            bundles/autotrack-extension.zip
+          if-no-files-found: error
+
+  publish:
+    needs: bundle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          path: out
+          merge-multiple: true
+      - name: SHA256SUMS
+        working-directory: out
+        run: |
+          ls -la
+          sha256sum autotrack-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" out/*
+          --repo "$GITHUB_REPOSITORY" --title "autotrack $GITHUB_REF_NAME" --generate-notes

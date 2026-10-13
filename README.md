@@ -1,0 +1,83 @@
+# autotrack
+
+autotrack records what you do on a Mac or Windows PC: every click, key and scroll, the app and
+the on-screen element you acted on, and the screen before and after. It runs in the background
+from login. Every 5 minutes it uploads what it recorded to a private S3 bucket. The data is for
+training computer-use agents.
+
+## Install
+
+You need an install code. Get one with `autobrowse autotrack enroll <device>`, which prints the
+full command for you.
+
+Mac (Terminal):
+
+```sh
+AUTOTRACK='<code>' sh -c "$(curl -fsSL https://raw.githubusercontent.com/wrenautomation/autotrack/main/install/install.sh)"
+```
+
+Windows (PowerShell):
+
+```powershell
+$env:AUTOTRACK='<code>'; irm https://raw.githubusercontent.com/wrenautomation/autotrack/main/install/install.ps1 | iex
+```
+
+You don't need admin rights or Node. The installer downloads the latest release, verifies its
+SHA-256, and sets autotrack to start at login. On a Mac it then opens System Settings so you can
+allow Accessibility, Input Monitoring and Screen Recording for `node`, and it waits until you
+have. To update, run the same command again.
+
+For page detail in Chrome or Edge, add the autotrack extension. The installer prints the link.
+
+## Use
+
+- Ctrl+Alt+Shift+P pauses or resumes. A notification shows which.
+- `autotrack status`: is it running, and is it paused.
+- `autotrack pause` and `autotrack resume`.
+- `autotrack doctor`: checks setup, permissions, CPU and memory.
+- `autotrack ship`: uploads now instead of waiting.
+- `autotrack uninstall`: removes the login item, the browser hookup and the app. If some
+  recordings haven't been uploaded yet, it asks before deleting them. `--yes` skips the question.
+
+## What it records
+
+- Mouse moves, clicks, drags and scrolls, plus keys and shortcuts. Typed text is grouped into runs.
+- The app, the window title, and the role and label of the element under the pointer. Not what
+  the element contains.
+- Screenshots right before and after each action, and every 2 seconds at most while the screen
+  changes without input. Each one is JPEG, at most 1920 px on a side.
+- With the extension: the page, the element you clicked, and what the click did.
+
+## What it never records
+
+- Text typed into password fields. It saves a `redacted` marker, not the keys.
+- Text that looks like a secret, such as an API key or token.
+- Anything while you're in a password manager (1Password, Bitwarden, Keychain Access, Passwords,
+  KeePass) or a window whose title looks like a bank. You can add more apps to the list in
+  `config.json`.
+- Anything while it's paused or the screen is locked.
+
+## Where the data goes
+
+Recordings wait on disk, in `~/Library/Application Support/autotrack` on a Mac or
+`%LOCALAPPDATA%\autotrack` on Windows. Every 5 minutes, finished segments upload to
+`s3://<bucket>/<device>/<session>/` and are deleted from disk. If the machine is offline they
+wait. Past 5 GB on disk, the oldest screenshots are deleted first and events are kept.
+
+Each device has its own key, and that key can only write under its own folder. It can't read,
+list or delete anything. A lost laptop exposes nothing that has already uploaded.
+
+## Develop
+
+```sh
+pnpm install
+pnpm -s typecheck && pnpm -s test && pnpm -s lint
+pnpm bundle          # bundles/autotrack-<platform>-<arch>.{zip,tar.gz} for this machine
+```
+
+CI (`.github/workflows/ci.yml`) runs those on Linux. On macOS and Windows runners it builds the
+bundle, installs it against a local S3 stub, drives real input, and checks what was uploaded. To
+release, push a tag `v<version>` that matches `package.json`. `release.yml` builds the three
+bundles and publishes them with `SHA256SUMS`.
+
+License: PolyForm Strict 1.0.0.

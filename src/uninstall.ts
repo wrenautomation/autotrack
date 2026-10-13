@@ -5,7 +5,7 @@
  * only after a yes (or `--yes`); a no keeps `sessions/` and nothing else.
  */
 import { spawn } from "node:child_process";
-import { existsSync, lstatSync, readdirSync, readlinkSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { countSegments, dirBytes, type ShipResult } from "./ship.ts";
@@ -95,9 +95,9 @@ export async function uninstall(d: UninstallDeps): Promise<number> {
 
   // 5. Remove the rest.
   if (d.platform === "darwin") {
-    const link = join(home, ".local", "bin", "autotrack");
+    const shim = join(home, ".local", "bin", "autotrack"); // written by install.sh
     try {
-      if (lstatSync(link).isSymbolicLink() && readlinkSync(link).startsWith(app)) rmSync(link);
+      if (readFileSync(shim, "utf8").includes(app)) rmSync(shim);
     } catch {}
   }
   if (existsSync(d.data))

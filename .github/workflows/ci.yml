@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint, typecheck, unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            extension/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -s lint
+      - run: pnpm -s typecheck
+      - run: pnpm -s test
+      - name: extension
+        working-directory: extension
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -s typecheck
+          pnpm -s test
+
+  e2e:
+    name: e2e ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # The helper tests run from this job's shell, so grant its likely "responsible" processes
+      # too (GitHub's macOS images run with SIP off). mac.sh grants the installed app separately.
+      - name: TCC grants for the helper tests (mac)
+        if: runner.os == 'macOS'
+        run: >
+          sh test/e2e/mac-tcc.sh "$(command -v node)" "$PWD/helpers/mac/probe"
+          /usr/local/opt/runner/provisioner/provisioner /bin/bash /bin/sh /bin/zsh || true
+      - name: helper tests (mac)
+        if: runner.os == 'macOS'
+        run: sh helpers/mac/test.sh
+      - name: helper tests (windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File helpers\win\test.ps1
+
+      - name: bundle
+        run: node scripts/bundle.mjs
+
+      - name: install, drive input, ship, check, uninstall (mac)
+        if: runner.os == 'macOS'
+        run: sh test/e2e/mac.sh
+      - name: install, drive input, ship, check, uninstall (windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File test\e2e\win.ps1
+
+      - name: logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.os }}
+          path: ${{ runner.temp }}/autotrack-e2e
+          if-no-files-found: ignore
+          retention-days: 7

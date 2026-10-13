@@ -15,6 +15,12 @@ beforeEach(() => {
   writeFileSync(join(data, "config.json"), "{}");
   mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
   writeFileSync(agentPlist(home), "<plist/>");
+  mkdirSync(join(home, ".local", "bin"), { recursive: true });
+  writeFileSync(
+    join(home, ".local", "bin", "autotrack"),
+    `exec "${join(data, "app", "bin", "autotrack")}"`,
+  );
+  writeFileSync(join(home, ".local", "bin", "other"), "not ours");
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -62,6 +68,8 @@ describe("uninstall", () => {
     ]);
     expect(existsSync(agentPlist(home))).toBe(false);
     expect(existsSync(data)).toBe(false);
+    expect(existsSync(join(home, ".local", "bin", "autotrack"))).toBe(false);
+    expect(existsSync(join(home, ".local", "bin", "other"))).toBe(true);
   });
 
   it("asks before deleting unshipped segments and keeps only sessions on no", async () => {
