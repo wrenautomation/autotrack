@@ -118,6 +118,23 @@ function setup(
 }
 
 describe("recorder", () => {
+  it("a front change seen while a text run is open is written after the run, in time order", async () => {
+    const r = setup();
+    r.raw({ type: "move", t: 50, x: 5, y: 5 });
+    r.typeText(100, "hi");
+    r.setFront({ app: app("Safari", "com.apple.Safari", 20), window: win("Docs") });
+    r.at(200);
+    await r.rec.frontTick();
+    r.raw({ type: "keydown", t: 300, key: "enter", mods: [] });
+    r.rec.foldTick();
+    await r.rec.settled();
+    await r.rec.stop();
+    const evs = r.events().filter((e) => e.kind !== "frame");
+    expect(evs.map((e) => e.kind)).toEqual(["move", "text", "focus", "key"]);
+    const ts = evs.map((e) => e.t);
+    expect(ts).toEqual([...ts].sort((x, y) => x - y));
+  });
+
   it("a click whose element misses 50 ms asks once more, with longer", async () => {
     const asks: (number | undefined)[] = [];
     const r = setup({
@@ -132,7 +149,7 @@ describe("recorder", () => {
     r.raw({ type: "up", t: 150, x: 50, y: 60, button: "left" });
     await r.rec.settled();
     await r.rec.stop();
-    expect(asks).toEqual([undefined, 300]);
+    expect(asks).toEqual([undefined, 1000]);
     expect(r.events()[0]).toMatchObject({ kind: "click", element: { role: "textarea" } });
   });
 

@@ -30,7 +30,7 @@ export const IDLE_TICK_MS = 2000;
 export const SEGMENT_TICK_MS = 30_000;
 export const SHIP_MS = 5 * 60_000;
 /** A point act whose element did not answer in 50 ms asks once more with this long. */
-export const AT_RETRY_MS = 300;
+export const AT_RETRY_MS = 1000;
 
 /** The probe surface the recorder uses (the real `Probe`, or a fake). */
 export interface ProbeLike {
@@ -112,6 +112,7 @@ export class Recorder {
   private lastFront: FrontAnswer | null = null;
   private lastRaw = Number.NEGATIVE_INFINITY;
   private chain: Promise<void> = Promise.resolve();
+  private deferred: { t: number; fn: () => void }[] = [];
   private stopHook: (() => void) | null = null;
   private timers: NodeJS.Timeout[] = [];
   private shipping = false;
@@ -179,6 +180,7 @@ export class Recorder {
     for (const h of this.timers) clearInterval(h);
     this.stopHook?.();
     this.folder.flush();
+    this.release(Number.POSITIVE_INFINITY);
     await this.chain;
     this.journal.close();
     this.d.probe.close();
@@ -258,6 +260,7 @@ export class Recorder {
 
   foldTick(): void {
     this.folder.tick(this.t(this.clock.now()));
+    this.release(this.folder.pendingSince);
   }
 
   /** The front app, polled while someone is active or an exclusion holds: pauses and focus. */
@@ -266,9 +269,11 @@ export class Recorder {
     if (this.userPaused || (!active && !this.gated)) return;
     const front = await this.front();
     const t = this.t(this.clock.now());
-    this.enqueue(async () => {
-      if (front) this.applyFront(front, t);
-    });
+    this.side(t, () =>
+      this.enqueue(async () => {
+        if (front) this.applyFront(front, t);
+      }),
+    );
   }
 
   async idleTick(): Promise<void> {
@@ -317,6 +322,7 @@ export class Recorder {
   }
 
   private onAct(a: Folded<Ctx>): void {
+    this.release(a.t);
     if (a.kind === "move") {
       const { end: _e, ctx: _c, ...move } = a;
       const display = this.d.displayAt?.(a.x, a.y);
@@ -420,6 +426,23 @@ export class Recorder {
     } catch (err) {
       this.d.log?.(`journal: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * A write beside the acts (a front poll's focus): it waits while an act that began before it is
+   * still folding (a text run, a held button), so events stay in time order.
+   */
+  private side(t: number, fn: () => void): void {
+    let i = this.deferred.length;
+    while (i > 0 && (this.deferred[i - 1] as { t: number }).t > t) i--;
+    this.deferred.splice(i, 0, { t, fn });
+    this.release(this.folder.pendingSince);
+  }
+
+  /** Run the side writes from before `before`, in time order. */
+  private release(before: number): void {
+    while (this.deferred.length && (this.deferred[0] as { t: number }).t < before)
+      (this.deferred.shift() as { fn: () => void }).fn();
   }
 
   private enqueue(fn: () => Promise<void>): void {

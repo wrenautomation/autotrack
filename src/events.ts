@@ -265,6 +265,16 @@ export class Folder<C> {
     }
   }
 
+  /** The earliest t not yet emitted (an act still folding or waiting to leave); Infinity if none. */
+  get pendingSince(): number {
+    return Math.min(
+      this.down?.t ?? Number.POSITIVE_INFINITY,
+      this.scroll?.t ?? Number.POSITIVE_INFINITY,
+      this.text?.t ?? Number.POSITIVE_INFINITY,
+      ...this.queue.map((a) => a.t),
+    );
+  }
+
   /** Close what timed out: a text run idle for 1 s, a scroll fold past 250 ms. */
   tick(t: number): void {
     if (this.text && t - this.text.last >= TEXT_IDLE_MS) this.endText();

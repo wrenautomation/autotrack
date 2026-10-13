@@ -112,22 +112,23 @@ func dismissCapturePrompt() {
 }
 
 dismissCapturePrompt()
+// What a probe would see at a point just before a click there, and how long AX took to say it.
+func axAt(_ p: CGPoint) {
+  var el: AXUIElement?
+  let t0 = DispatchTime.now()
+  let err = AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(p.x), Float(p.y), &el)
+  let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6
+  var role: CFTypeRef?
+  if let el = el { AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role) }
+  log("AX at \(Int(p.x)),\(Int(p.y)): err \(err.rawValue), role \(role as? String ?? "none"), \(Int(ms)) ms; front \(frontName())")
+}
 // Left part of the text area: clear of anything centered on screen. Rest on it first so the
 // recorder's 1 s front poll has met TextEdit before the click asks the probe about it.
 let target = CGPoint(x: w.minX + 80, y: w.minY + 120)
 CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: target, mouseButton: .left)?
   .post(tap: .cghidEventTap)
 pause(1500)
-// What a probe would see at the target just before the click, and how long AX took to say it.
-do {
-  var el: AXUIElement?
-  let t0 = DispatchTime.now()
-  let err = AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(target.x), Float(target.y), &el)
-  let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6
-  var role: CFTypeRef?
-  if let el = el { AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role) }
-  log("AX at target: err \(err.rawValue), role \(role as? String ?? "none"), \(Int(ms)) ms; front \(frontName())")
-}
+axAt(target)
 click(target)
 pause(800)
 // Keys typed while another app is in front would land elsewhere (a focused password box turns on
@@ -159,6 +160,7 @@ else {
   log("no form coordinates in \(formPath)")
   exit(1)
 }
+axAt(CGPoint(x: pw["x"]!, y: pw["y"]!))
 click(CGPoint(x: pw["x"]!, y: pw["y"]!))
 pause(800)
 type("hunter2pw")

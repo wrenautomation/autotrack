@@ -121,30 +121,26 @@ try {
         Check ($front.window.width -gt 0 -and $front.window.height -gt 0) 'front window has no size'
     }
 
-    # type something, then focused + at on the text box (a multiline box is a UIA Document)
+    # type something, then focused + at on the text box (an Edit, a Document when multiline, or a
+    # Pane when UIA reaches WinForms through the Win32 proxy)
     [System.Windows.Forms.SendKeys]::SendWait($secret)
     Start-Sleep -Milliseconds 300
     $foc = Ask @{ op = 'focused' }
     Test-Element $foc.element 'focused element'
     if ($foc.element) {
-        Check ($foc.element.role -match '^(edit|document)$') "focused role is '$($foc.element.role)', expected edit or document"
+        Check ($foc.element.role -match '^(edit|document|pane)$') "focused role is '$($foc.element.role)', expected edit, document or pane"
         Check ($foc.element.secure -eq $false) 'the text box reported secure'
     }
 
-    # WinForms' AutomationId is not the control's Name here, so the two boxes are told apart by
+    # WinForms text boxes reach UIA through the Win32 proxy as Panes with numeric ids on some
+    # runners, so they are found by their window class (WindowsForms10.EDIT…) and told apart by
     # height: the multiline notes box is tall, the titled box one line.
-    $ct = $UIA::ControlTypeProperty
-    $boxes = @()
-    foreach ($type in @([System.Windows.Automation.ControlType]::Edit, [System.Windows.Automation.ControlType]::Document)) {
-        $cond = New-Object System.Windows.Automation.PropertyCondition -ArgumentList $ct, $type
-        foreach ($e in $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) { $boxes += $e }
-    }
-    $boxes = @($boxes | Sort-Object { $_.Current.BoundingRectangle.Height })
-    $roles = ($boxes | ForEach-Object { '{0} {1}px' -f $_.Current.ControlType.ProgrammaticName, [int]$_.Current.BoundingRectangle.Height }) -join ', '
+    $desc = @($win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition))
+    $boxes = @($desc | Where-Object { $_.Current.ClassName -match '(?i)edit' } | Sort-Object { $_.Current.BoundingRectangle.Height })
+    $roles = ($boxes | ForEach-Object { '{0} {1} {2}px' -f $_.Current.ControlType.ProgrammaticName, $_.Current.ClassName, [int]$_.Current.BoundingRectangle.Height }) -join ', '
     Write-Host "text boxes in the form: $roles"
     if ($boxes.Count -lt 2) {
-        $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-        Write-Host ("form descendants: " + (($all | ForEach-Object { '{0} "{1}" id={2}' -f $_.Current.ControlType.ProgrammaticName, $_.Current.Name, $_.Current.AutomationId }) -join '; '))
+        Write-Host ("form descendants: " + (($desc | ForEach-Object { '{0} {1} id={2}' -f $_.Current.ControlType.ProgrammaticName, $_.Current.ClassName, $_.Current.AutomationId }) -join '; '))
         $tops = $UIA::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
         Write-Host ("top-level windows: " + (($tops | ForEach-Object { '"{0}" pid {1}' -f $_.Current.Name, $_.Current.ProcessId }) -join '; '))
     }
@@ -157,7 +153,7 @@ try {
         $at = Ask @{ op = 'at'; x = $cx; y = $cy }
         Test-Element $at.element "at($cx,$cy)"
         if ($at.element) {
-            Check ($at.element.role -match '^(edit|document)$') "at role is '$($at.element.role)', expected edit or document"
+            Check ($at.element.role -match '^(edit|document|pane)$') "at role is '$($at.element.role)', expected edit, document or pane"
             Check ($at.element.secure -eq $false) 'at: the text box reported secure'
             Check ($at.element.cls -is [string] -and $at.element.cls.Length -gt 0) 'at: the text box has no cls (UIA ClassName)'
             $e = $at.element

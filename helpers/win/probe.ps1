@@ -494,7 +494,8 @@ foreach ($prop in @(
         [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
         [System.Windows.Automation.AutomationElement]::ClassNameProperty,
         [System.Windows.Automation.AutomationElement]::HelpTextProperty,
-        [System.Windows.Automation.AutomationElement]::LabeledByProperty)) { $script:cache.Add($prop) }
+        [System.Windows.Automation.AutomationElement]::LabeledByProperty,
+        [System.Windows.Automation.ValuePattern]::ValueProperty)) { $script:cache.Add($prop) }
 $script:walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 $script:windowTypeId = [System.Windows.Automation.ControlType]::Window.Id
 $maxAncestors = 6
@@ -505,10 +506,10 @@ function Get-RoleName($controlType) {
 }
 
 # UIA's Name is often the content itself: a Document or Edit named by its text, a combo box or
-# list item named by its value. A Document takes its name only from its label (LabeledBy); an Edit
-# or value role loses a name that shows its value (an Edit then falls back to its label). Values
-# are read only to compare, never sent.
-$script:valueRoles = @('edit', 'combobox', 'spinner', 'listitem', 'dataitem', 'treeitem', 'custom')
+# list item named by its value, a WinForms text box (seen as a Pane) named by what was typed. A
+# Document or a Win32 edit class takes its name only from its label (LabeledBy); any other element
+# loses a name that shows its ValuePattern value and falls back to its label. The value comes in
+# the same cached call and is read only to compare, never sent.
 $script:valueProp = [System.Windows.Automation.ValuePattern]::ValueProperty
 
 function Test-ShowsValue([string]$name, [string]$value) {
@@ -519,7 +520,7 @@ function Test-ShowsValue([string]$name, [string]$value) {
 
 function Get-ValueText($el) {
     try {
-        $v = $el.GetCurrentPropertyValue($script:valueProp, $true)
+        $v = $el.GetCachedPropertyValue($script:valueProp, $true)
         if ($v -is [string]) { return $v }
     } catch { }
     return ''
@@ -532,12 +533,11 @@ function Get-LabelName($c) {
 
 # $c: the element's Cached properties.
 function Get-SafeName($el, $c, [string]$role) {
-    if ($role -eq 'document') { return (Get-LabelName $c) }
+    if ($role -eq 'document' -or [string]$c.ClassName -match '(?i)edit') { return (Get-LabelName $c) }
     $name = [string]$c.Name
-    if ($name.Length -eq 0 -or $script:valueRoles -notcontains $role) { return $name }
+    if ($name.Length -eq 0) { return $name }
     $value = Get-ValueText $el
     if (-not (Test-ShowsValue $name $value)) { return $name }
-    if ($role -ne 'edit') { return '' }
     $label = Get-LabelName $c
     if (Test-ShowsValue $label $value) { return '' }
     return $label
