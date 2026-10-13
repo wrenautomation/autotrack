@@ -247,6 +247,101 @@ New `Event` kinds, appended to the union:
 y?: number; target?: WebTarget; effects?: WebEffects }`
 `| { kind: "app"; url: string; action: string; detail: unknown }`
 
+## Signal: why it was clicked, and what came of it (2026-10-13, William)
+
+"needs good signal (why everything was clicked, analytics, browsers, etc. for tracking for RL)".
+An RL trajectory needs four things per act: what was seen (observation), what was done (action),
+why (intent), and what came of it (outcome, the reward's raw material). autotrack had the first two.
+This adds the rest in three places: the recorder and extension capture facts, an offline pass in
+autobrowse derives and labels, the lake makes it queryable.
+
+### Captured on the machine (facts only, never guessed)
+
+Recorder (`src/`, `helpers/`):
+
+- **Act outcome.** Each click, drag, scroll, text and key event, written once its after-frame is
+  known, gains `out: { screen: boolean, focus: boolean, dialog: boolean, window: boolean }`: the
+  frame hash moved, the front app or window changed, a dialog appeared, a window opened or closed.
+- **Accessibility tree.** Probe op `tree` returns the front window's tree (visible nodes only,
+  `{role, name, id, x, y, width, height, depth}`, ≤ 1,500 nodes, depth ≤ 25, never a value, a
+  secure field's name kept but marked). Captured on `focus` and after an act whose `out.screen` is
+  true, at most once per second, deduped by hash. Stored as `trees/<n>.json` in the segment; events
+  reference it: `{kind:"tree", tree:n}` and act events gain `tree?: n` (the latest tree before the
+  act). This is the observation most computer-use models read alongside the screenshot.
+- **Dialogs.** `{kind:"dialog", title, text (≤ 300), buttons: string[]}` when the front window
+  becomes an alert, sheet or modal dialog (Mac `AXSheet`/`AXDialog`/`AXSystemDialog`, Windows UIA
+  `IsModal` or ControlType Window with a dialog class). Errors often arrive this way.
+- **Clipboard.** `{kind:"clipboard", types: string[], length, text?, redacted}` when the clipboard
+  changes (Mac `NSPasteboard.changeCount` polled at 4 Hz in the helper; Windows
+  `GetClipboardSequenceNumber`). `text` ≤ 2,000 chars, through the same redaction; none from an
+  excluded app or a secure field. The copy's source app is on `Base`; the next paste is a `key`
+  (cmd/ctrl+v) or a `web` `paste`.
+- **Task marker (the person's own "why").** Ctrl+Alt+Shift+T opens a one-line prompt ("What are
+  you doing?"; Mac `osascript display dialog`, Windows an InputBox) and writes
+  `{kind:"task", goal}`; an empty answer writes `{kind:"task", goal:"", done:true}`. Optional,
+  never nags. The strongest label there is when it's given.
+
+Extension (`extension/`), new `web` acts:
+
+- `nav`: `{url, from, transition}` from `webNavigation` (`link`, `typed`, `reload`, `form_submit`,
+  `back_forward`, `auto_bookmark`, `generated`…). `tab`: `{op: "open"|"close"|"switch", count}`.
+- `search`: `{engine, query}` when a navigation is a search on Google, Bing, DuckDuckGo, YouTube,
+  Amazon, Reddit, X, LinkedIn or the site's own `?q=`/`?query=`/`?search=`.
+- `copy`/`cut`/`paste`: target hints and `text` ≤ 2,000 through redaction (never a password field).
+- `select`: selected text ≤ 500 on mouse up (what the person was reading).
+- `download`: `{ext, mime, bytes, origin}` from `chrome.downloads`; never the file.
+- `effect` gains `errors: [{message ≤ 200, source}]` (console errors and unhandled rejections from a
+  main-world listener in the 1 s window) and keeps `requests` with status (a 4xx/5xx is a failure).
+- `snapshot`: the page's accessibility outline as text (role + name lines, like autobrowse's aria,
+  ≤ 30k chars, visible part only), on load complete and after an effect with > 20 DOM changes, at
+  most once per 2 s per tab. The recorder stores any `tree` string over 2 KB as `trees/<n>.txt`
+  and writes `treeFile: n` in its place.
+
+### Derived offline (`autobrowse autotrack label`)
+
+Reads a session from the bucket, writes `labels/<device>/<session>.json` beside it and locally.
+
+1. **Join.** An OS `click` and a `web` `click` are one act when `|ts| < 150 ms` and within 4 px;
+   the web target replaces a thin OS element.
+2. **Rule signals per act** (no model): `dwell` (ms since the last act), `hover` (ms the pointer
+   rested on the target before the act), `dead` (no screen change, no effect, no focus change),
+   `rage` (≥ 3 clicks on the same target in 2 s), `correction` (undo, a backspace run over what was
+   just typed, back navigation within 5 s), `error` (a dialog, a failed request, a console error
+   after the act).
+3. **Episodes.** Split at `task` markers when present; else at idle ≥ 2 min or a switch to an
+   unrelated app/domain held ≥ 30 s.
+4. **Model labels** (LLM gateway, free Gemini keys, cached by episode hash): per episode a `goal`
+   (one sentence), an `outcome` (`done`, `failed`, `abandoned`, `unclear`) and a confidence; per
+   act an `intent` (one short clause: "open the invoice to check the amount"). Input: acts with
+   their elements, web targets, effects, rule signals, and the before/after frames shrunk to 768 px.
+   A person's `task` goal always beats the model's.
+
+`labels` shape: `{ v:1, session, episodes: [{ id, start, end, goal, goalBy: "person"|"model",
+outcome, confidence }], acts: [{ t, episode, intent, signals: {dwell, hover?, dead, rage,
+correction, error} }] }`.
+
+### Analytics (wren lake)
+
+`wren lake build` gains models over the bucket (DuckDB reads the gzipped JSONL in S3 directly):
+`warehouse.autotrack_acts` (one row per act, joined, with app, domain, element, signals, intent),
+`autotrack_daily` (per device per day: active minutes, acts, apps and domains by time, dead/rage/
+error rates), `autotrack_episodes`. The lake job's role gets read on the track bucket. Ask with
+`wren lake sql`; nothing about a device's rows ever goes to CI logs.
+
+### Wren's own events
+
+The portal sends `window.postMessage({autotrack:{v:1, action, detail}}, "*")` at its command layer
+for every user command: the action name, the record ids, and what the API answered (ok or the
+error). That's the exact "why" and "what came of it" for every act inside Wren.
+
+### Decision log (signal)
+
+- Facts on the machine, meaning offline: the recorder never calls a model; labels can be redone
+  with a better model over old data.
+- Task marker over always-on narration: no microphone on someone else's laptop; the marker is
+  optional and one line.
+- Trees on change, not per act: a tree is 5–50 KB; per act it would outweigh the frames.
+
 ## Decision log
 
 - Node + `uiohook-napi` over Rust: same language and redaction rules as autobrowse, the library
