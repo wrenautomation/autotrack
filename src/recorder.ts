@@ -51,11 +51,13 @@ export const SEGMENT_TICK_MS = 30_000;
 export const SHIP_MS = 5 * 60_000;
 /**
  * A point act's element: asked at the click with this long to answer (only the act's own write
- * waits on it; a later first ask could see the screen after the click). A null is asked once
- * more when the act is written, with the helper waiting as long: on a Mac, AX misses 40 ms while
- * the clicked app takes focus (more so a password field turning on secure input).
+ * waits on it; the Windows helper can take over 1 s, and a later first ask could see the screen
+ * after the click). A null is asked once more when the act is written, with the helper waiting
+ * AT_WAIT_MS: on a Mac, AX misses 40 ms while the clicked app takes focus (more so a password
+ * field turning on secure input).
  */
-export const AT_MS = 1000;
+export const AT_MS = 3000;
+export const AT_WAIT_MS = 1000;
 /** Trees: at most one a second. */
 export const TREE_MIN_MS = 1000;
 /** An incoming `tree` string over this many bytes is stored as `trees/<n>.txt`. */
@@ -500,7 +502,7 @@ export class Recorder {
     const c = this.coords();
     let target = await ctx.target;
     if (target === null && ctx.at && this.d.probe.running)
-      target = await this.d.probe.at(ctx.at.x, ctx.at.y, AT_MS, AT_MS);
+      target = await this.d.probe.at(ctx.at.x, ctx.at.y, AT_MS, AT_WAIT_MS);
     let text: { text: string; redacted: boolean } | null = null;
     if (a.kind === "text") {
       if (target === null && this.d.probe.available)

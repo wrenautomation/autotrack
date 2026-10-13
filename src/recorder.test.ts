@@ -160,7 +160,7 @@ describe("recorder", () => {
     expect(ts).toEqual([...ts].sort((x, y) => x - y));
   });
 
-  it("a click's element gets 1 s; a null is asked once more with the helper waiting", async () => {
+  it("a click's element gets 3 s; a null is asked once more with the helper waiting 1 s", async () => {
     const asks: [number | undefined, number | undefined][] = [];
     const r = setup({
       at: (_x, _y, ms, wait) => {
@@ -175,8 +175,8 @@ describe("recorder", () => {
     await r.rec.settled();
     await r.rec.stop();
     expect(asks).toEqual([
-      [1000, undefined],
-      [1000, 1000],
+      [3000, undefined],
+      [3000, 1000],
     ]);
     expect(r.events()[0]).toMatchObject({ kind: "click", element: { role: "textarea" } });
   });

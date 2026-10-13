@@ -129,8 +129,9 @@ Mac: `helpers/mac/probe.swift`, built by `swiftc -O` into a universal binary in 
 shipped in the Mac bundle (and built on first run if missing and `swiftc` exists). Windows:
 `helpers/win/probe.ps1`, Windows PowerShell 5.1 (on every Windows), `UIAutomationClient` +
 P/Invoke for the foreground window. Each answer under 50 ms p95; a timeout gives `null`, never a
-stall in the hook. A click's `at` is the exception: it is asked at the click with 1 s to answer
-(only that act's write waits on it, and a later first ask could see the screen after the click).
+stall in the hook. A click's `at` is the exception: it is asked at the click with 3 s to answer
+(only that act's write waits on it; the Windows helper can take over 1 s, and a later first ask
+could see the screen after the click).
 A null is asked again when the act is written, with `"wait":1000`, which raises the Mac helper's
 AX timeout to match (an app taking focus, or a password field turning on secure input, misses
 40 ms; asked again at once, it still missed on CI). Windows ignores `wait`.
