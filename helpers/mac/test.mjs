@@ -19,8 +19,11 @@ const ask = (req) =>
   new Promise((resolve, reject) => {
     const id = nextId++;
     const timer = setTimeout(() => reject(new Error(`no answer to ${JSON.stringify(req)}`)), 2000);
-    pending.set(id, (m) => (clearTimeout(timer), resolve(m)));
-    child.stdin.write(JSON.stringify({ id, ...req }) + "\n");
+    pending.set(id, (m) => {
+      clearTimeout(timer);
+      resolve(m);
+    });
+    child.stdin.write(`${JSON.stringify({ id, ...req })}\n`);
   });
 
 const failures = [];
@@ -172,7 +175,7 @@ child.stdin.end();
 const code = await new Promise((res) => child.on("exit", res));
 check(code === 0, `probe exits 0 when stdin closes (got ${code})`);
 if (failures.length) {
-  console.error("FAIL:\n- " + failures.join("\n- "));
+  console.error(`FAIL:\n- ${failures.join("\n- ")}`);
   process.exit(1);
 }
 console.log("ok");
