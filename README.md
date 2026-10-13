@@ -27,7 +27,11 @@ SHA-256, and sets autotrack to start at login. On a Mac it then opens System Set
 allow Accessibility, Input Monitoring and Screen Recording for `node`, and it waits until you
 have. To update, run the same command again.
 
-For page detail in Chrome or Edge, add the autotrack extension. The installer prints the link.
+For page detail in Chrome or Edge, load the autotrack extension. The installer unpacks it to
+`extension/` in the data folder (see "Where the data goes"), copies that path to your clipboard,
+and opens `chrome://extensions` or `edge://extensions` for each browser it finds. There, turn on
+Developer mode, click Load unpacked, and pick the folder. If autotrack is already listed after an
+update, press its reload button. The extension isn't on the Chrome Web Store yet.
 
 ## Use
 

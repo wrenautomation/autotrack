@@ -10,11 +10,14 @@
 #   AUTOTRACK_ENDPOINT       S3-compatible endpoint instead of AWS
 #   AUTOTRACK_NO_AUTOSTART=1 install everything but load no LaunchAgent and ask for nothing
 #   AUTOTRACK_PERM_TIMEOUT   seconds to wait for the permissions (default 600)
+#   AUTOTRACK_NO_BROWSER=1   unpack the extension but don't copy its path or open a browser
 set -eu
 
 REPO=wrenautomation/autotrack
 LABEL=com.wrenautomation.autotrack
-# Placeholder until the extension is published (unlisted) on the Chrome Web Store.
+# The extension ships unpacked until it is on the Chrome Web Store. Set STORE_LIVE=1 once the
+# listing exists: the installer then prints STORE_URL and no longer unpacks or opens anything.
+STORE_LIVE=0
 STORE_URL="https://chromewebstore.google.com/detail/autotrack/colpoheiepckdglfmebejhelggjikjim"
 
 say() { printf '%s\n' "$*"; }
@@ -103,6 +106,25 @@ say "Installed $(cat "$app/VERSION") in $app"
 
 (umask 077 && "$node" "$app/install/setup.mjs") || die "setup failed"
 
+# The browser extension, unpacked at a stable path (Chrome and Edge reload unpacked extensions
+# from it on restart). Replaced on update. The manifest's fixed key keeps the extension id.
+ext="$data/extension"
+if [ "$STORE_LIVE" != 1 ]; then
+  rm -rf "$data/extension.new"
+  mkdir "$data/extension.new"
+  if unzip -q "$app/extension.zip" -d "$data/extension.new" && [ -f "$data/extension.new/manifest.json" ]; then
+    rm -rf "$data/extension.old"
+    [ -d "$ext" ] && mv "$ext" "$data/extension.old"
+    mv "$data/extension.new" "$ext"
+    rm -rf "$data/extension.old"
+    say "Extension unpacked in $ext"
+  else
+    rm -rf "$data/extension.new"
+    say "Warning: could not unpack the browser extension. The recorder works without it."
+    ext=""
+  fi
+fi
+
 # `autotrack` on the command line.
 mkdir -p "$HOME/.local/bin"
 envline=""
@@ -142,8 +164,51 @@ mkdir -p "$(dirname "$plist")"
 agent_plist "$LABEL" "$data/launchd.log" 1 "$app/dist/cli.js" start >"$plist"
 say "Login item $plist"
 
+# Browser extension: three steps per browser found.
+have_app() { [ -d "/Applications/$1.app" ] || [ -d "$HOME/Applications/$1.app" ]; }
+# <app name> <bundle id> <url>. chrome:// URLs aren't openable by `open -a`; AppleScript works
+# whether or not the browser is running (it may ask to let Terminal control it). Fallback: pass the
+# URL as an argument, which only takes effect if the browser wasn't running.
+open_page() {
+  osascript -e "tell application \"$1\" to activate" -e "tell application \"$1\" to open location \"$3\"" >/dev/null 2>&1 && return 0
+  open -b "$2" --args "$3" >/dev/null 2>&1 || true
+}
+browser_steps() { # <app name> <bundle id> <scheme>
+  say ""
+  say "$1:"
+  say "  1. Open $3://extensions and turn on Developer mode (top right)."
+  say "  2. Click Load unpacked."
+  say "  3. Press Cmd+Shift+G, paste the folder (already copied), press Enter, then Select."
+  [ -n "${AUTOTRACK_NO_BROWSER:-}" ] || open_page "$1" "$2" "$3://extensions"
+}
+
+extension_help() {
+  say ""
+  if [ "$STORE_LIVE" = 1 ]; then
+    say "Browser clicks: add the autotrack extension to Chrome or Edge: $STORE_URL"
+  elif [ -n "$ext" ]; then
+    say "Browser clicks: load the autotrack extension in Chrome or Edge."
+    say "Folder: $ext"
+    found=""
+    if [ -z "${AUTOTRACK_NO_BROWSER:-}" ]; then
+      have_app "Google Chrome" && found="$found chrome"
+      have_app "Microsoft Edge" && found="$found edge"
+    fi
+    if [ -n "$found" ]; then
+      printf '%s' "$ext" | pbcopy 2>/dev/null && say "(Copied to your clipboard.)"
+      case $found in *chrome*) browser_steps "Google Chrome" com.google.Chrome chrome ;; esac
+      case $found in *edge*) browser_steps "Microsoft Edge" com.microsoft.edgemac edge ;; esac
+      say ""
+      say "If autotrack is already listed there, press its reload button instead."
+    else
+      say "Open chrome://extensions (or edge://extensions), turn on Developer mode, Load unpacked, pick that folder."
+    fi
+  fi
+}
+
 if [ -z "$autostart" ]; then
   say "AUTOTRACK_NO_AUTOSTART set: not starting it, not asking for permissions."
+  extension_help
   say "Done."
   exit 0
 fi
@@ -237,4 +302,4 @@ fi
 say "Pause or resume: Ctrl+Alt+Shift+P (a notification says which)."
 say "Status: autotrack status    Uninstall: autotrack uninstall"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) say "(autotrack is in ~/.local/bin, not on your PATH: run \"$cli\" instead.)" ;; esac
-say "Browser clicks: add the autotrack extension to Chrome or Edge: $STORE_URL"
+extension_help

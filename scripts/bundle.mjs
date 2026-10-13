@@ -16,7 +16,8 @@
  *   host/*.mjs               native messaging host for the browser extension
  *   install/setup.mjs        config.json + browser host, run by install.sh / install.ps1
  *   install/perm.mjs         Mac: asks the probe which permissions node holds
- *   extension.zip            the browser extension as uploaded to the Web Store
+ *   extension.zip            the browser extension with its manifest `key`; the installers unpack
+ *                            it to <data>/extension (the Web Store zip is `pnpm zip` in extension/)
  *   autotrack.cmd (Windows) | bin/autotrack (Mac)    the CLI
  */
 import { execFileSync } from "node:child_process";

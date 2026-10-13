@@ -116,14 +116,18 @@ try {
     $env:AUTOTRACK = $code
     $env:AUTOTRACK_BUNDLE = $bundle
     $env:AUTOTRACK_ENDPOINT = "http://127.0.0.1:$port"
+    $env:AUTOTRACK_NO_BROWSER = '1'
     & (Join-Path $repo 'install\install.ps1')
-    Remove-Item Env:AUTOTRACK, Env:AUTOTRACK_BUNDLE, Env:AUTOTRACK_ENDPOINT
+    Remove-Item Env:AUTOTRACK, Env:AUTOTRACK_BUNDLE, Env:AUTOTRACK_ENDPOINT, Env:AUTOTRACK_NO_BROWSER
     $task = Get-ScheduledTask -TaskName 'autotrack' -ErrorAction SilentlyContinue
     $run = Get-ItemProperty -Path $runKey -Name 'autotrack' -ErrorAction SilentlyContinue
     if ($task) { Write-Host "scheduled task: $($task.State)" }
     elseif ($run) { Write-Host '::warning::e2e: no scheduled task; the Run key fallback was used' }
     else { Die 'no scheduled task and no Run value' }
     foreach ($k in $hostKeys) { if (-not (Test-Path $k)) { Die "no native host key $k" } }
+    $extManifest = Join-Path $data 'extension\manifest.json'
+    if (-not (Test-Path $extManifest)) { Die "no unpacked extension at $extManifest" }
+    if (-not (Select-String -Path $extManifest -Pattern '"key"' -Quiet)) { Die 'unpacked manifest.json has no key (the extension id would change)' }
     $acl = (Get-Acl (Join-Path $data 'config.json')).Access
     if ($acl.Count -ne 1) { Die "config.json is readable by $($acl.Count) principals: $($acl | ForEach-Object IdentityReference)" }
     if (-not (Running)) { Die 'recorder not running after install' }
@@ -189,6 +193,10 @@ try {
     if (Get-ScheduledTask -TaskName 'autotrack' -ErrorAction SilentlyContinue) { Die 'scheduled task still registered' }
     if (Get-ItemProperty -Path $runKey -Name 'autotrack' -ErrorAction SilentlyContinue) { Die 'Run value still there' }
     foreach ($k in $hostKeys) { if (Test-Path $k) { Die "native host key still there: $k" } }
+    for ($i = 0; Test-Path $extManifest; $i++) { # removed with the rest of the data dir
+        if ($i -gt 30) { Die "unpacked extension still at $extManifest" }
+        Start-Sleep -Seconds 1
+    }
     if (([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') -contains $app) { Die 'app still on the user PATH' }
     for ($i = 0; Test-Path $app; $i++) { # removed by a detached cmd once node has exited
         if ($i -gt 30) { Die "app still in $app" }

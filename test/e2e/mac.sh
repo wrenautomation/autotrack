@@ -63,7 +63,7 @@ fi
 step "install.sh"
 {
   AUTOTRACK="$code" AUTOTRACK_BUNDLE="$bundle" AUTOTRACK_ENDPOINT="http://127.0.0.1:$port" \
-    AUTOTRACK_PERM_TIMEOUT=60 sh "$repo/install/install.sh" 2>&1 && rc=0 || rc=$?
+    AUTOTRACK_PERM_TIMEOUT=60 AUTOTRACK_NO_BROWSER=1 sh "$repo/install/install.sh" 2>&1 && rc=0 || rc=$?
   echo "$rc" >"$work/install.rc"
 } | tee "$work/install.log"
 [ "$(cat "$work/install.rc")" = 0 ] || die "install.sh exited $(cat "$work/install.rc")"
@@ -72,6 +72,8 @@ launchctl print "gui/$uid/$label" >/dev/null 2>&1 || die "LaunchAgent not loaded
 for b in "Google/Chrome" "Microsoft Edge"; do
   [ -f "$HOME/Library/Application Support/$b/NativeMessagingHosts/$label.json" ] || die "no $b native host manifest"
 done
+[ -f "$data/extension/manifest.json" ] || die "no unpacked extension in $data/extension"
+grep -q '"key"' "$data/extension/manifest.json" || die "unpacked manifest.json has no key (the extension id would change)"
 grep -q "Input Monitoring granted" "$work/install.log" || soft="$soft,input"
 grep -q "Accessibility granted" "$work/install.log" || soft="$soft,input"
 grep -q "Screen Recording granted" "$work/install.log" || soft="$soft,screen"
@@ -148,5 +150,6 @@ for b in "Google/Chrome" "Microsoft Edge"; do
   [ ! -f "$HOME/Library/Application Support/$b/NativeMessagingHosts/$label.json" ] || die "$b native host manifest still there"
 done
 [ ! -d "$app" ] || die "app still in $app"
+[ ! -e "$data/extension/manifest.json" ] || die "unpacked extension still in $data/extension"
 [ ! -e "$cli" ] || die "CLI shim still in $cli"
 echo "uninstall left nothing registered"

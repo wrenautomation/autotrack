@@ -9,6 +9,7 @@
 #   AUTOTRACK_DIR             data dir (default %LOCALAPPDATA%\autotrack)
 #   AUTOTRACK_ENDPOINT        S3-compatible endpoint instead of AWS
 #   AUTOTRACK_NO_AUTOSTART=1  install everything but register and start nothing
+#   AUTOTRACK_NO_BROWSER=1    unpack the extension but don't copy its path or open a browser
 #
 # Run through `iex`, so it never calls `exit` (that would close the window): errors throw.
 
@@ -20,7 +21,9 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the pro
     $Repo = 'wrenautomation/autotrack'
     $Task = 'autotrack'
     $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    # Placeholder until the extension is published (unlisted) on the Chrome Web Store.
+    # The extension ships unpacked until it is on the Chrome Web Store. Set $StoreLive = $true once
+    # the listing exists: the installer then prints $StoreUrl and no longer unpacks or opens anything.
+    $StoreLive = $false
     $StoreUrl = 'https://chromewebstore.google.com/detail/autotrack/colpoheiepckdglfmebejhelggjikjim'
 
     function Say([string]$msg) { Write-Host $msg }
@@ -125,6 +128,26 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the pro
         Quiet { & icacls (Join-Path $data 'config.json') /inheritance:r /grant:r "*${sid}:(F)" | Out-Null }
         if ($LASTEXITCODE -ne 0) { Die 'could not restrict config.json to this user' }
 
+        # The browser extension, unpacked at a stable path (Chrome and Edge reload unpacked
+        # extensions from it on restart). Replaced on update. The manifest's fixed key keeps the id.
+        $ext = Join-Path $data 'extension'
+        if (-not $StoreLive) {
+            $extNew = Join-Path $data 'extension.new'
+            $extOld = Join-Path $data 'extension.old'
+            try {
+                foreach ($d in $extNew, $extOld) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force } }
+                [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $app 'extension.zip'), $extNew)
+                if (-not (Test-Path -LiteralPath (Join-Path $extNew 'manifest.json'))) { throw 'manifest.json missing from extension.zip' }
+                if (Test-Path -LiteralPath $ext) { Move-Item -LiteralPath $ext -Destination $extOld }
+                Move-Item -LiteralPath $extNew -Destination $ext
+                if (Test-Path -LiteralPath $extOld) { Remove-Item -LiteralPath $extOld -Recurse -Force -ErrorAction SilentlyContinue }
+                Say "Extension unpacked in $ext"
+            } catch {
+                Say "Warning: could not unpack the browser extension ($($_.Exception.Message)). The recorder works without it."
+                $ext = $null
+            }
+        }
+
         # `autotrack` on the command line (user PATH).
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         $parts = @(if ($userPath) { $userPath -split ';' | Where-Object { $_ } })
@@ -149,8 +172,54 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the pro
         $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
         $launch = "`"$wscript`" //B //Nologo `"$vbs`""
 
+        # Browser extension: three steps per browser found.
+        function Find-Browser([string]$exe, [string[]]$dirs) {
+            foreach ($root in 'HKCU', 'HKLM') {
+                $p = (Get-ItemProperty -Path "${root}:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$exe" -ErrorAction SilentlyContinue).'(default)'
+                if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+            }
+            foreach ($d in $dirs) {
+                $p = Join-Path $d $exe
+                if (Test-Path -LiteralPath $p) { return $p }
+            }
+            return $null
+        }
+        function Extension-Help {
+            Say ''
+            if ($StoreLive) {
+                Say "Browser clicks: add the autotrack extension to Chrome or Edge: $StoreUrl"
+            } elseif ($ext) {
+                Say 'Browser clicks: load the autotrack extension in Chrome or Edge.'
+                Say "Folder: $ext"
+                $pf = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA) | Where-Object { $_ }
+                $found = @()
+                if (-not $env:AUTOTRACK_NO_BROWSER) {
+                    $chrome = Find-Browser 'chrome.exe' ($pf | ForEach-Object { Join-Path $_ 'Google\Chrome\Application' })
+                    $edge = Find-Browser 'msedge.exe' ($pf | ForEach-Object { Join-Path $_ 'Microsoft\Edge\Application' })
+                    if ($chrome) { $found += , @('Chrome', 'chrome', $chrome) }
+                    if ($edge) { $found += , @('Edge', 'edge', $edge) }
+                }
+                if ($found.Count -gt 0) {
+                    try { Set-Clipboard -Value $ext; Say '(Copied to your clipboard.)' } catch { }
+                    foreach ($b in $found) {
+                        Say ''
+                        Say "$($b[0]):"
+                        Say "  1. Open $($b[1])://extensions and turn on Developer mode (top right)."
+                        Say '  2. Click Load unpacked.'
+                        Say '  3. Paste the folder (already copied) into the Folder box, then Select Folder.'
+                        try { Start-Process -FilePath $b[2] -ArgumentList "$($b[1])://extensions" } catch { Say "  (Could not open it: $($_.Exception.Message))" }
+                    }
+                    Say ''
+                    Say 'If autotrack is already listed there, press its reload button instead.'
+                } else {
+                    Say 'Open chrome://extensions (or edge://extensions), turn on Developer mode, Load unpacked, pick that folder.'
+                }
+            }
+        }
+
         if (-not $autostart) {
             Say 'AUTOTRACK_NO_AUTOSTART set: no task registered, not started.'
+            Extension-Help
             return
         }
 
@@ -200,7 +269,7 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the pro
         Say 'Pause or resume: Ctrl+Alt+Shift+P (a notification says which).'
         Say 'Status: autotrack status    Uninstall: autotrack uninstall   (new terminals; or run'
         Say "  `"$app\autotrack.cmd`" status)"
-        Say "Browser clicks: add the autotrack extension to Chrome or Edge: $StoreUrl"
+        Extension-Help
     } finally {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
