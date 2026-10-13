@@ -134,13 +134,20 @@ try {
     # WinForms' AutomationId is not the control's Name here, so the two boxes are told apart by
     # height: the multiline notes box is tall, the titled box one line.
     $ct = $UIA::ControlTypeProperty
-    $boxCond = New-Object System.Windows.Automation.OrCondition -ArgumentList @(
-        (New-Object System.Windows.Automation.PropertyCondition $ct, ([System.Windows.Automation.ControlType]::Edit)),
-        (New-Object System.Windows.Automation.PropertyCondition $ct, ([System.Windows.Automation.ControlType]::Document)))
-    $boxes = @($win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $boxCond)) |
-        Sort-Object { $_.Current.BoundingRectangle.Height }
+    $boxes = @()
+    foreach ($type in @([System.Windows.Automation.ControlType]::Edit, [System.Windows.Automation.ControlType]::Document)) {
+        $cond = New-Object System.Windows.Automation.PropertyCondition -ArgumentList $ct, $type
+        foreach ($e in $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) { $boxes += $e }
+    }
+    $boxes = @($boxes | Sort-Object { $_.Current.BoundingRectangle.Height })
     $roles = ($boxes | ForEach-Object { '{0} {1}px' -f $_.Current.ControlType.ProgrammaticName, [int]$_.Current.BoundingRectangle.Height }) -join ', '
     Write-Host "text boxes in the form: $roles"
+    if ($boxes.Count -lt 2) {
+        $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+        Write-Host ("form descendants: " + (($all | ForEach-Object { '{0} "{1}" id={2}' -f $_.Current.ControlType.ProgrammaticName, $_.Current.Name, $_.Current.AutomationId }) -join '; '))
+        $tops = $UIA::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+        Write-Host ("top-level windows: " + (($tops | ForEach-Object { '"{0}" pid {1}' -f $_.Current.Name, $_.Current.ProcessId }) -join '; '))
+    }
     $edit = $null; $titled = $null
     if ($boxes.Count -ge 2) { $titled = $boxes[0]; $edit = $boxes[$boxes.Count - 1] }
     if ($null -eq $edit) { Fail "expected two text boxes in the test form, found: $roles" }

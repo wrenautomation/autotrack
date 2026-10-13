@@ -42,8 +42,8 @@ export class Probe extends HelperClient {
     super({ ...opts, name: "probe" });
   }
 
-  at(x: number, y: number): Promise<AtAnswer | null> {
-    return this.call("at", { x: Math.round(x), y: Math.round(y) });
+  at(x: number, y: number, timeoutMs?: number): Promise<AtAnswer | null> {
+    return this.call("at", { x: Math.round(x), y: Math.round(y) }, timeoutMs);
   }
   front(): Promise<FrontAnswer | null> {
     return this.call("front");

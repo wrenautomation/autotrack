@@ -6,7 +6,7 @@
  *
  * Hard checks: a session arrived, session.json has endedAt, events parse and are in time order,
  * the typed password never appears anywhere. Checks that need an OS permission the runner may not
- * grant (input: typed "hello", clicks with element role and name, the redacted run; screen:
+ * grant (input: typed "hello", clicks with an element role, Submit named, the redacted run; screen:
  * frames) turn into loud `::warning::` lines when named in --soft, never silent passes.
  * --mac: macOS secure input hides keystrokes in a password box from every event tap, so a missing
  * redacted run there is a warning, not a failure (the leak check stays hard).
@@ -169,13 +169,11 @@ for (const c of clicks)
     `      click ${c.x},${c.y} on ${JSON.stringify(c.element ? { role: c.element.role, name: c.element.name } : null)}`,
   );
 check(clicks.length >= 2, `${clicks.length} click(s) recorded (want 2 or more)`, "input");
-const named = clicks.filter(
-  (c) =>
-    typeof c.element?.role === "string" && c.element.role && typeof c.element.name === "string",
-);
+// Every click knows what it hit (a role); names are checked where the control has a label (Submit).
+const known = clicks.filter((c) => typeof c.element?.role === "string" && c.element.role);
 check(
-  clicks.length > 0 && named.length === clicks.length,
-  `every click carries an element role and name (${named.length}/${clicks.length})`,
+  clicks.length > 0 && known.length === clicks.length,
+  `every click carries an element with a role (${known.length}/${clicks.length})`,
   "input",
 );
 check(

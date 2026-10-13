@@ -29,12 +29,14 @@ export const FRONT_POLL_MS = 1000;
 export const IDLE_TICK_MS = 2000;
 export const SEGMENT_TICK_MS = 30_000;
 export const SHIP_MS = 5 * 60_000;
+/** A point act whose element did not answer in 50 ms asks once more with this long. */
+export const AT_RETRY_MS = 300;
 
 /** The probe surface the recorder uses (the real `Probe`, or a fake). */
 export interface ProbeLike {
   readonly available: boolean;
   readonly running: boolean;
-  at(x: number, y: number): Promise<AtAnswer | null>;
+  at(x: number, y: number, timeoutMs?: number): Promise<AtAnswer | null>;
   front(): Promise<FrontAnswer | null>;
   focused(): Promise<FocusedAnswer | null>;
   perm(timeoutMs?: number): Promise<PermAnswer | null>;
@@ -67,6 +69,8 @@ interface Ctx {
   before: Promise<Frame | null>;
   front: Promise<FrontAnswer | null>;
   target: Promise<AtAnswer | FocusedAnswer | null>;
+  /** The act's point in the probe's coordinates, for asking again. */
+  at?: { x: number; y: number };
 }
 
 export interface Status {
@@ -304,11 +308,12 @@ export class Recorder {
   private begin(b: Begin, _t: number): Ctx {
     const c = this.coords();
     let target: Promise<AtAnswer | FocusedAnswer | null>;
+    let at: { x: number; y: number } | undefined;
     if (b.on === "point") {
-      const p = c.toPhysical(b.x, b.y);
-      target = this.d.probe.at(p.x, p.y);
+      at = c.toPhysical(b.x, b.y);
+      target = this.d.probe.at(at.x, at.y);
     } else target = this.d.probe.focused();
-    return { before: this.screen.before(), front: this.front(), target };
+    return { before: this.screen.before(), front: this.front(), target, ...(at ? { at } : {}) };
   }
 
   private onAct(a: Folded<Ctx>): void {
@@ -340,6 +345,9 @@ export class Recorder {
     if (gateOf(this.gate, ...frontParts(front)) !== null) return { event: null, front };
     const c = this.coords();
     let target = await ctx.target;
+    // The first ask into an app the probe has not talked to yet can miss 50 ms: once more, longer.
+    if (target === null && ctx.at && this.d.probe.running)
+      target = await this.d.probe.at(ctx.at.x, ctx.at.y, AT_RETRY_MS);
     let text: { text: string; redacted: boolean } | null = null;
     if (a.kind === "text") {
       if (target === null && this.d.probe.available)

@@ -118,6 +118,16 @@ let target = CGPoint(x: w.minX + 80, y: w.minY + 120)
 CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: target, mouseButton: .left)?
   .post(tap: .cghidEventTap)
 pause(1500)
+// What a probe would see at the target just before the click, and how long AX took to say it.
+do {
+  var el: AXUIElement?
+  let t0 = DispatchTime.now()
+  let err = AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(target.x), Float(target.y), &el)
+  let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6
+  var role: CFTypeRef?
+  if let el = el { AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role) }
+  log("AX at target: err \(err.rawValue), role \(role as? String ?? "none"), \(Int(ms)) ms; front \(frontName())")
+}
 click(target)
 pause(800)
 // Keys typed while another app is in front would land elsewhere (a focused password box turns on

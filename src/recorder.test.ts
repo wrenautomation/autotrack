@@ -26,7 +26,12 @@ const field = (secure: boolean): Element => ({
   secure,
 });
 
-function setup(opts: { focused?: () => { element: Element | null } | null } = {}) {
+function setup(
+  opts: {
+    focused?: () => { element: Element | null } | null;
+    at?: (x: number, y: number, timeoutMs?: number) => { element: Element | null } | null;
+  } = {},
+) {
   const sessions = mkdtempSync(join(tmpdir(), "track-recorder-"));
   dirs.push(sessions);
   let now = 1000;
@@ -37,7 +42,8 @@ function setup(opts: { focused?: () => { element: Element | null } | null } = {}
   const probe: ProbeLike = {
     available: true,
     running: true,
-    at: async () => ({ element: { ...field(false), role: "button", name: "OK" } }),
+    at: async (x, y, ms) =>
+      opts.at ? opts.at(x, y, ms) : { element: { ...field(false), role: "button", name: "OK" } },
     front: async () => front,
     focused: async () => (opts.focused ? opts.focused() : { element: field(false) }),
     perm: async () => ({ accessibility: true, screen: true, input: true }),
@@ -112,6 +118,24 @@ function setup(opts: { focused?: () => { element: Element | null } | null } = {}
 }
 
 describe("recorder", () => {
+  it("a click whose element misses 50 ms asks once more, with longer", async () => {
+    const asks: (number | undefined)[] = [];
+    const r = setup({
+      at: (_x, _y, ms) => {
+        asks.push(ms);
+        return asks.length === 1
+          ? null
+          : { element: { ...field(false), role: "textarea", name: "" } };
+      },
+    });
+    r.raw({ type: "down", t: 100, x: 50, y: 60, button: "left" });
+    r.raw({ type: "up", t: 150, x: 50, y: 60, button: "left" });
+    await r.rec.settled();
+    await r.rec.stop();
+    expect(asks).toEqual([undefined, 300]);
+    expect(r.events()[0]).toMatchObject({ kind: "click", element: { role: "textarea" } });
+  });
+
   it("a click carries element, app, window, display and before/after frames on disk", async () => {
     const r = setup();
     r.raw({ type: "down", t: 100, x: 50, y: 60, button: "left" });
