@@ -1,0 +1,25 @@
+{
+  "name": "@wrenautomation/autotrack-extension",
+  "version": "0.1.0",
+  "description": "Browser extension and native host for autotrack: what was clicked in the browser, as granular as it gets.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "e2e": "vitest run --config vitest.e2e.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check . ../host",
+    "key": "node scripts/key.mjs",
+    "icons": "node scripts/icons.mjs",
+    "zip": "node scripts/pack.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@types/chrome": "0.3.5",
+    "@types/node": "22.20.3",
+    "jsdom": "30.1.2",
+    "typescript": "5.9.3",
+    "vitest": "5.0.1"
+  },
+  "license": "PolyForm-Strict-1.0.0"
+}

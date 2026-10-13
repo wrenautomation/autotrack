@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "autotrack",
+  "version": "0.1.0",
+  "description": "Records what you click and type in the browser, for your own autotrack recorder. Nothing leaves your computer through it.",
+  "minimum_chrome_version": "111",
+  "incognito": "not_allowed",
+  "permissions": ["nativeMessaging", "webRequest"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "sw/sw.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true,
+      "run_at": "document_start",
+      "world": "MAIN",
+      "js": ["main.js"]
+    },
+    {
+      "matches": ["<all_urls>"],
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true,
+      "run_at": "document_start",
+      "js": ["content/redact.js", "content/hints.js", "content/bridge.js", "content/content.js"]
+    }
+  ],
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuWdxvzvDf1aVEbCpJ5Smd46xjHJlbgu6ogBxOBv7xBP1T7ImJ6kK6hOOyU8HpwmQHhXa/M2qfgBz18xZvfut7DmACam+KrDgeK/qhwudDJaj94n7NKyXrgt8JfrNDyByNg6nT9TX5ZLlBcTXC6oy9xosBR0WB5YNqTT1am184nMdU10hx2RfvfKhs6ndi1EHpczNoA6KH0DVbACWaMvGXiy4oJ+a8aiUxfl2xwcSebug4+P2c8cFzDmRovRie2oPe6dSyACJoulP4lGDYOOjLyee+rpnuF2YdzJRG74Q5Q9jPnl3gt4VeQsXlqeyekQjLbpu+Exs3D68nl8Wb41vMwIDAQAB"
+}
