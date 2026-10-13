@@ -401,6 +401,11 @@ public static class AutotrackShots {
     exit [AutotrackShots]::Run()
 }
 
+# Startup stages go to stderr (the recorder ignores it; a test run shows it), so a helper that
+# never answers says where it stopped.
+$startClock = [System.Diagnostics.Stopwatch]::StartNew()
+function Write-Stage([string]$m) { [Console]::Error.WriteLine(('probe {0} ms: {1}' -f $startClock.ElapsedMilliseconds, $m)) }
+Write-Stage 'compiling native helpers'
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -469,8 +474,9 @@ public static class AutotrackNative {
 '@
 
 # Before UIA loads, so its coordinates come back physical.
-[void][AutotrackNative]::EnableDpiAwareness()
+Write-Stage ('DPI awareness: ' + [AutotrackNative]::EnableDpiAwareness())
 Add-Type -AssemblyName WindowsBase, UIAutomationClient, UIAutomationTypes
+Write-Stage 'UI Automation loaded'
 
 function ConvertTo-Rounded([double]$v) {
     if ([double]::IsNaN($v) -or [double]::IsInfinity($v)) { return 0 }
@@ -596,17 +602,30 @@ function Invoke-Op($req) {
 # Escape everything above ASCII so the line is the same bytes under any console code page.
 $escape = [System.Text.RegularExpressions.MatchEvaluator]{ param($m) '\u{0:x4}' -f [int][char]$m.Value }
 
+# UTF-8 in, BOM dropped: a .NET parent whose console is UTF-8 writes one before its first line,
+# which ConvertFrom-Json refuses (the shots helper's StreamReader skips it by itself).
+$stdin = New-Object System.IO.StreamReader -ArgumentList ([Console]::OpenStandardInput()), (New-Object System.Text.UTF8Encoding -ArgumentList $false)
+$stdout = New-Object System.IO.StreamWriter -ArgumentList ([Console]::OpenStandardOutput()), (New-Object System.Text.ASCIIEncoding)
+$stdout.AutoFlush = $true
+$stdout.NewLine = "`n"
+Write-Stage 'ready'
 while ($true) {
-    $line = [Console]::In.ReadLine()
+    $line = $stdin.ReadLine()
     if ($null -eq $line) { break }
+    $line = $line.TrimStart([char]0xFEFF)
     if ($line.Trim().Length -eq 0) { continue }
     try {
         $req = $line | ConvertFrom-Json
+    } catch {
+        # No id to answer to, so say nothing on stdout.
+        Write-Stage ('unparseable line: ' + $line.Substring(0, [math]::Min(80, $line.Length)))
+        continue
+    }
+    try {
         $json = (Invoke-Op $req) | ConvertTo-Json -Compress -Depth 4
         $json = [System.Text.RegularExpressions.Regex]::Replace($json, '[^\x00-\x7F]', $escape)
-        [Console]::Out.WriteLine($json)
-        [Console]::Out.Flush()
+        $stdout.WriteLine($json)
     } catch {
-        # Unparseable line: no id to answer to, so say nothing.
+        Write-Stage ('answer failed: ' + $_.Exception.Message)
     }
 }

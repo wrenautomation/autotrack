@@ -77,8 +77,20 @@ guard let w = win else {
   exit(1)
 }
 log("TextEdit window \(w)")
+func frontName() -> String { NSWorkspace.shared.frontmostApplication?.localizedName ?? "?" }
+
 click(CGPoint(x: w.midX, y: w.midY + 20))
 pause(800)
+// Keys typed while another app is in front would land elsewhere (a focused password box turns on
+// secure input, which hides them from every event tap): say so in the log rather than guess.
+log("front after click: \(frontName())")
+if frontName() != "TextEdit" {
+  NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.TextEdit").first?.activate()
+  pause(800)
+  click(CGPoint(x: w.midX, y: w.midY + 20))
+  pause(800)
+  log("front after retry: \(frontName())")
+}
 type("hello")
 key(returnKey)
 pause(1500) // the text run ends at Return; let frames settle

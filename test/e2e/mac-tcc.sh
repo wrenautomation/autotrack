@@ -35,12 +35,26 @@ for db in "/Library/Application Support/com.apple.TCC/TCC.db" "$HOME/Library/App
   fi
 done
 
-# Screen Recording on macOS 15+: skip the "bypass the private window picker" re-approval.
+# Screen Recording on macOS 15+: skip the "bypass the private window picker" prompt, which otherwise
+# covers the screen and keeps the e2e form (and its secure input) in front. macOS 15.0 kept a date per
+# client; later versions keep a dict per client with the next alert date (seen on macOS 26).
 approvals="$HOME/Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist"
 mkdir -p "$(dirname "$approvals")"
+[ -f "$approvals" ] || printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict/></plist>\n' >"$approvals"
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 for path in "$@"; do
-  defaults write "$approvals" "$path" -date "3024-01-01 00:00:00 +0000" 2>/dev/null || true
+  case $path in *.*) # plutil key paths split on dots
+    defaults write "$approvals" "$path" -date "3024-01-01 00:00:00 +0000" 2>/dev/null || true
+    continue ;;
+  esac
+  plutil -replace "$path" -dictionary "$approvals" &&
+    plutil -replace "$path.kScreenCapturePrivacyHintDate" -date "3024-01-01T00:00:00Z" "$approvals" &&
+    plutil -replace "$path.kScreenCaptureApprovalLastAlerted" -date "$now" "$approvals" &&
+    plutil -replace "$path.kScreenCapturePrivacyHintPolicy" -integer 2592000 "$approvals" &&
+    plutil -replace "$path.kScreenCaptureAlertableUsageCount" -integer 1 "$approvals" ||
+    echo "::warning::e2e: could not pre-approve screen capture for $path"
 done
+killall replayd 2>/dev/null || true
 
 # tccd caches decisions: restart both (launchd brings them back).
 sudo killall tccd 2>/dev/null || true

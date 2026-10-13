@@ -29,6 +29,8 @@ final class Delegate: NSObject, NSApplicationDelegate {
     window.setFrameOrigin(NSPoint(x: vis.maxX - window.frame.width - 40, y: vis.minY + 40))
     window.level = .floating
     window.makeKeyAndOrderFront(nil)
+    // No focused box until the driver clicks one: a focused password box turns on secure input.
+    window.makeFirstResponder(nil)
     NSApp.activate(ignoringOtherApps: true)
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.writeCenters() }
   }
@@ -41,6 +43,7 @@ final class Delegate: NSObject, NSApplicationDelegate {
   }
 
   func writeCenters() {
+    window.makeFirstResponder(nil) // again: activation can hand the window its initial responder
     let json: [String: Any] = ["password": center(field), "submit": center(button), "pid": getpid()]
     let data = try! JSONSerialization.data(withJSONObject: json)
     try! data.write(to: URL(fileURLWithPath: out + ".tmp"))
