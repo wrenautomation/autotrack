@@ -97,7 +97,9 @@ same as a 1080p one.
   box, list item or AX text field drops a name that equals or contains its value (or that its value
   contains, from 12 characters). The helpers read the value only to compare.
 - **Password fields never log keys.** The probe answers `secure` for the focused element
-  (Mac: `AXSecureTextField` subrole or `IsSecureEventInputEnabled()`; Windows: UIA `IsPassword`).
+  (Mac: `AXSecureTextField` subrole or `IsSecureEventInputEnabled()`; Windows: UIA `IsPassword`,
+  or a Win32 edit class whose window has `ES_PASSWORD` or a password char: UIA's proxy shows a
+  WinForms box as a Pane with `IsPassword` false).
   Typing into one writes `{kind:"text", text:"", redacted:true}`. When the probe can't answer in
   50 ms, keys are held, not written, until it does.
 - **Secret-shaped text** (autobrowse `looksLikeSecretValue` patterns, copied) is redacted.

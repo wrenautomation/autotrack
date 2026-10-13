@@ -416,6 +416,19 @@ public static class AutotrackNative {
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
 
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] static extern int StyleOf(IntPtr h, int index);
+    [DllImport("user32.dll")] static extern IntPtr SendMessageTimeoutW(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr result);
+
+    // A Win32 edit that masks its text. UIA's Win32 proxy only knows the class "Edit", so a
+    // WinForms box (WindowsForms10.EDIT...) comes through as a Pane with IsPassword false: ask the
+    // window itself (ES_PASSWORD, or EM_GETPASSWORDCHAR non-zero).
+    public static bool PasswordEdit(IntPtr h) {
+        if (h == IntPtr.Zero) return false;
+        if ((StyleOf(h, -16) & 0x20) != 0) return true;
+        IntPtr r;
+        return SendMessageTimeoutW(h, 0xD2, IntPtr.Zero, IntPtr.Zero, 0x2, 50, out r) != IntPtr.Zero && r != IntPtr.Zero;
+    }
+
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] static extern int GetWindowTextLengthW(IntPtr h);
@@ -495,6 +508,7 @@ foreach ($prop in @(
         [System.Windows.Automation.AutomationElement]::ClassNameProperty,
         [System.Windows.Automation.AutomationElement]::HelpTextProperty,
         [System.Windows.Automation.AutomationElement]::LabeledByProperty,
+        [System.Windows.Automation.AutomationElement]::NativeWindowHandleProperty,
         [System.Windows.Automation.ValuePattern]::ValueProperty)) { $script:cache.Add($prop) }
 $script:walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 $script:windowTypeId = [System.Windows.Automation.ControlType]::Window.Id
@@ -560,6 +574,13 @@ function Get-Path($el, $clock) {
     return , $path.ToArray()
 }
 
+# UIA's IsPassword, or a Win32 edit class (WinForms, RichEdit) whose window masks its text.
+function Test-Secure($c) {
+    if ($c.IsPassword) { return $true }
+    if ([string]$c.ClassName -notmatch '(?i)edit') { return $false }
+    return [AutotrackNative]::PasswordEdit([IntPtr][int]$c.NativeWindowHandle)
+}
+
 function Get-ElementJson($raw) {
     if ($null -eq $raw) { return $null }
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
@@ -574,7 +595,7 @@ function Get-ElementJson($raw) {
         y      = ConvertTo-Rounded $b.Y
         width  = ConvertTo-Rounded $b.Width
         height = ConvertTo-Rounded $b.Height
-        secure = [bool]$c.IsPassword
+        secure = (Test-Secure $c)
     }
     $path = Get-Path $el $clock
     if ($path.Count -gt 0) { $out['path'] = $path }
