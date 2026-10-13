@@ -7,7 +7,7 @@ import { homedir, hostname } from "node:os";
 import { join as nativeJoin, posix, win32 } from "node:path";
 
 /**
- * The install code: base64url of this JSON. Same shape as autobrowse `src/track/code.ts`
+ * The install code: base64url of this JSON. Same shape as autobrowse `src/autotrack/code.ts`
  * (the source of truth), checked by hand here since track imports nothing from autobrowse.
  */
 export interface TrackCode {
@@ -70,6 +70,23 @@ export interface Config {
   maxLocalGb: number;
   /** Where segments ship; absent until the install code is in. */
   ship?: TrackCode;
+  /** S3-compatible endpoint instead of AWS (path-style); https, or http on localhost (tests). */
+  endpoint?: string;
+}
+
+/** An endpoint config.json may name, or null. */
+export function checkEndpoint(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    return null;
+  }
+  const local = ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
+  if (!(u.protocol === "https:" || (u.protocol === "http:" && local))) return null;
+  if (u.pathname !== "/" || u.search || u.username || u.password) return null;
+  return u.origin;
 }
 
 export function dataDir(
@@ -111,7 +128,7 @@ export function hostDevice(name = hostname()): string {
 }
 
 /**
- * config.json: `{ code?, device?, excludeApps?, excludeTitles?, maxLocalGb? }`. `code` is the
+ * config.json: `{ code?, device?, excludeApps?, excludeTitles?, maxLocalGb?, endpoint? }`. `code` is the
  * install code as given (base64url) or already decoded. A bad code is reported, not fatal:
  * recording goes on, shipping waits.
  */
@@ -141,6 +158,11 @@ export function parseConfig(raw: unknown, warn: (msg: string) => void = () => {}
     maxLocalGb: typeof o.maxLocalGb === "number" && o.maxLocalGb > 0 ? o.maxLocalGb : 5,
   };
   if (ship) cfg.ship = ship;
+  if (o.endpoint !== undefined) {
+    const endpoint = checkEndpoint(o.endpoint);
+    if (endpoint) cfg.endpoint = endpoint;
+    else warn(`config: bad endpoint ${JSON.stringify(o.endpoint)}`);
+  }
   return cfg;
 }
 

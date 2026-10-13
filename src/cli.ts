@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * autotrack start|stop|pause|resume|status|doctor (ship and uninstall come with packaging).
- * `start` runs in the foreground; the login item runs it. The others talk to it over the
- * control socket.
+ * autotrack start|stop|pause|resume|status|ship|doctor|uninstall.
+ * `start` runs in the foreground; the login item runs it. stop, pause, resume and status talk to
+ * it over the control socket; ship and uninstall work on the data dir.
  */
 import { execFileSync, spawn } from "node:child_process";
 import {
@@ -18,16 +18,18 @@ import {
 } from "node:fs";
 import { arch, release, tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { displayAt, nodeCapturer, osScreens, windowFront, workerEncoder } from "./capture.ts";
 import { type Config, dataDir, loadConfig, sessionsDir } from "./config.ts";
-import { type Command, lock, type Request, send, serve } from "./control.ts";
+import { type Command, lock, type Request, runningPid, send, serve } from "./control.ts";
 import { type Coords, coordsFor, identity } from "./coords.ts";
 import { startHook, uiohook } from "./hook.ts";
 import { notify } from "./notify.ts";
 import { helperCommand, openProbe, PACKAGE_ROOT } from "./probe.ts";
 import { Recorder, type Status } from "./recorder.ts";
-import { noShipper, type Shipper } from "./ship.ts";
+import { noShipper, type Shipper, shipperFor } from "./ship.ts";
+import { removeLaterWin, uninstall } from "./uninstall.ts";
 
 const VERSION = (() => {
   try {
@@ -116,7 +118,11 @@ async function start(data: string): Promise<number> {
   const config = loadConfig(data, log);
   let recorder: Recorder;
   try {
-    recorder = await openRecorder(data, config, { notify: true, shipper: noShipper, log });
+    recorder = await openRecorder(data, config, {
+      notify: true,
+      shipper: shipperFor(data, config, log),
+      log,
+    });
     recorder.start();
   } catch (e) {
     held.release();
@@ -298,6 +304,72 @@ function relaunch(): Promise<number> | null {
   return new Promise((resolve) => child.on("exit", (code) => resolve(code ?? 1)));
 }
 
+/** One pass now, backoff ignored. Exit 1 when anything is left or nothing could ship. */
+async function shipNow(data: string): Promise<number> {
+  const config = loadConfig(data, (m) => console.error(m));
+  const log = (m: string) => console.error(m);
+  const r = await shipperFor(data, config, log).ship(sessionsDir(data), { force: true });
+  console.log(JSON.stringify(r, null, 2));
+  if (r.skipped === "no code") console.error("no install code in config.json: nothing ships");
+  if (r.skipped === "busy") console.error("the recorder is shipping right now; try again shortly");
+  return r.failed || r.skipped ? 1 : 0;
+}
+
+async function uninstallCmd(data: string, args: string[]): Promise<number> {
+  const log = (m: string) => console.log(m);
+  return uninstall({
+    platform: process.platform,
+    data,
+    yes: args.includes("--yes") || args.includes("-y"),
+    run: (cmd, cmdArgs, env) =>
+      new Promise((resolve) => {
+        const child = spawn(cmd, cmdArgs, {
+          stdio: "ignore",
+          windowsHide: true,
+          env: env ?? process.env,
+        });
+        child.on("error", () => resolve(-1));
+        child.on("exit", (code) => resolve(code ?? -1));
+      }),
+    confirm: async (question) => {
+      if (!process.stdin.isTTY) return false;
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        return /^y(es)?$/i.test((await rl.question(question)).trim());
+      } finally {
+        rl.close();
+      }
+    },
+    stopRecorder: async () => {
+      await send(data, "stop");
+      for (let i = 0; i < 100; i++) {
+        const pid = runningPid(data);
+        if (!pid) return;
+        if (i === 80) {
+          try {
+            process.kill(pid);
+          } catch {}
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    },
+    hostUninstall: async () => {
+      const host = join(PACKAGE_ROOT, "host", "manifests.mjs");
+      if (!existsSync(host)) return;
+      const m = (await import(pathToFileURL(host).href)) as { uninstall(): Promise<void> };
+      await m.uninstall();
+    },
+    ship: async () => {
+      const config = loadConfig(data);
+      return config.ship
+        ? shipperFor(data, config, log).ship(sessionsDir(data), { force: true })
+        : null;
+    },
+    removeLater: removeLaterWin,
+    log,
+  });
+}
+
 const USAGE = "usage: autotrack start|stop|pause|resume|status|ship|doctor|uninstall";
 
 export async function main(argv: string[]): Promise<number> {
@@ -314,9 +386,9 @@ export async function main(argv: string[]): Promise<number> {
     case "doctor":
       return (entry && relaunch()) || doctor(data);
     case "ship":
+      return shipNow(data);
     case "uninstall":
-      console.error(`autotrack ${cmd}: not built yet`);
-      return 2;
+      return uninstallCmd(data, argv.slice(1));
     default:
       console.error(USAGE);
       return cmd ? 2 : 0;
