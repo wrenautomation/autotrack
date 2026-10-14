@@ -35,6 +35,7 @@ function setup(
       y: number,
       timeoutMs?: number,
       waitMs?: number,
+      down?: boolean,
     ) => { element: Element | null } | null;
     tree?: () => TreeAnswer | null | Promise<TreeAnswer | null>;
     ask?: (q: string) => Promise<string | null>;
@@ -57,9 +58,9 @@ function setup(
   const probe: ProbeLike = {
     available: true,
     running: true,
-    at: async (x, y, ms, wait) =>
+    at: async (x, y, ms, wait, down) =>
       opts.at
-        ? opts.at(x, y, ms, wait)
+        ? opts.at(x, y, ms, wait, down)
         : { element: { ...field(false), role: "button", name: "OK" } },
     front: async () => front,
     focused: async () => (opts.focused ? opts.focused() : { element: field(false) }),
@@ -181,11 +182,11 @@ describe("recorder", () => {
     expect(ts).toEqual([...ts].sort((x, y) => x - y));
   });
 
-  it("a click's element gets 3 s; a null is asked once more with the helper waiting 1 s", async () => {
-    const asks: [number | undefined, number | undefined][] = [];
+  it("a click's element is the press's (down), gets 3 s and 1 s of helper wait; a null is asked once more", async () => {
+    const asks: [number | undefined, number | undefined, boolean | undefined][] = [];
     const r = setup({
-      at: (_x, _y, ms, wait) => {
-        asks.push([ms, wait]);
+      at: (_x, _y, ms, wait, down) => {
+        asks.push([ms, wait, down]);
         return asks.length === 1
           ? null
           : { element: { ...field(false), role: "textarea", name: "" } };
@@ -196,8 +197,8 @@ describe("recorder", () => {
     await r.rec.settled();
     await r.rec.stop();
     expect(asks).toEqual([
-      [3000, undefined],
-      [3000, 1000],
+      [3000, 1000, true],
+      [3000, 1000, undefined],
     ]);
     expect(r.events()[0]).toMatchObject({ kind: "click", element: { role: "textarea" } });
   });

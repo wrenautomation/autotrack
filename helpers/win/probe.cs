@@ -17,6 +17,10 @@
 // no focus event came, the foreground thread's focus window is the same and the answer is under
 // 2 s old; the front window's dialog check is kept the same way. UIA has no per-call timeout, so
 // a hung app can stall one request; the caller times out to null.
+//
+// A click's element is read at button-down, in this process: a low-level mouse hook (class Down)
+// sees each press, and a scroll's first tick, before the app under it does. `at` with "down"
+// answers that read, so a button that closes its window on release still reads as the button.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -61,7 +65,12 @@ static class Probe {
         string op = Json.Str(req, "op");
         try {
             switch (op) {
-                case "at": return "\"element\":" + At(req);
+                case "at":
+                    if (Json.True(req, "down")) {
+                        string d = Down.Take(Json.Num(req, "x", double.NaN), Json.Num(req, "y", double.NaN));
+                        if (d != null) return "\"element\":" + d;
+                    }
+                    return "\"element\":" + At(req);
                 case "focused": return "\"element\":" + Focused();
                 case "front": return Front();
                 case "tree":
@@ -91,6 +100,10 @@ static class Probe {
     static string At(Dictionary<string, object> req) {
         double x = Json.Num(req, "x", double.NaN), y = Json.Num(req, "y", double.NaN);
         if (double.IsNaN(x) || double.IsNaN(y)) return "null";
+        return ReadAt(x, y);
+    }
+
+    public static string ReadAt(double x, double y) {
         AutomationElement el;
         using (elemCache.Activate()) el = AutomationElement.FromPoint(new System.Windows.Point(x, y));
         return ElementJson(el);
@@ -315,8 +328,8 @@ static class Probe {
     }
 }
 
-// Foreground and focus changes, counted. Out of context: the callback runs on this thread's
-// message loop, nothing loads into other processes.
+// Foreground and focus changes, counted, and button-downs handed to Down. Out of context and
+// low-level: the callbacks run on this thread's message loop, nothing loads into other processes.
 static class Hooks {
     public static long FocusSeq, FrontSeq;
     public static volatile bool Running;
@@ -330,6 +343,18 @@ static class Hooks {
     [DllImport("user32.dll")] static extern int GetMessageW(out MSG m, IntPtr h, uint min, uint max);
     [DllImport("user32.dll")] static extern bool TranslateMessage(ref MSG m);
     [DllImport("user32.dll")] static extern IntPtr DispatchMessageW(ref MSG m);
+
+    delegate IntPtr MouseProc(int code, IntPtr wParam, IntPtr lParam);
+    [StructLayout(LayoutKind.Sequential)]
+    struct MSLLHOOKSTRUCT { public int x, y; public uint mouseData, flags, time; public IntPtr extra; }
+    [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookExW(int id, MouseProc proc, IntPtr mod, uint thread);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandleW(string name);
+    const int WhMouseLL = 14;
+    const int WmLButtonDown = 0x0201, WmRButtonDown = 0x0204, WmMButtonDown = 0x0207, WmXButtonDown = 0x020B;
+    const int WmMouseWheel = 0x020A, WmMouseHWheel = 0x020E;
+    const int WmLButtonUp = 0x0202, WmRButtonUp = 0x0205, WmMButtonUp = 0x0208, WmXButtonUp = 0x020C;
+    static MouseProc mouseProc; // kept alive for the hook
 
     const uint EventSystemForeground = 0x0003, EventObjectFocus = 0x8005;
     const uint OutOfContext = 0x0000, SkipOwnProcess = 0x0002;
@@ -351,6 +376,10 @@ static class Hooks {
             return;
         }
         Running = true;
+        mouseProc = OnMouse;
+        if (SetWindowsHookExW(WhMouseLL, mouseProc, GetModuleHandleW(null), 0) == IntPtr.Zero)
+            Io.Stage("mouse hook failed (" + Marshal.GetLastWin32Error() + "): a click's element is read when asked");
+        else Down.Start();
         MSG m;
         while (GetMessageW(out m, IntPtr.Zero, 0, 0) > 0) {
             TranslateMessage(ref m);
@@ -359,9 +388,112 @@ static class Hooks {
         Running = false;
     }
 
+    static IntPtr OnMouse(int code, IntPtr wParam, IntPtr lParam) {
+        if (code >= 0) {
+            int msg = wParam.ToInt32();
+            bool press = msg == WmLButtonDown || msg == WmRButtonDown || msg == WmMButtonDown || msg == WmXButtonDown;
+            bool wheel = msg == WmMouseWheel || msg == WmMouseHWheel;
+            bool up = msg == WmLButtonUp || msg == WmRButtonUp || msg == WmMButtonUp || msg == WmXButtonUp;
+            if (up) Down.Release();
+            else if (press || wheel) {
+                try {
+                    MSLLHOOKSTRUCT h = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+                    Down.Press(h.x, h.y, wheel);
+                } catch (Exception) { }
+            }
+        }
+        return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
+    }
+
     static void OnEvent(IntPtr hook, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time) {
         if (ev == EventSystemForeground) Interlocked.Increment(ref FrontSeq);
         Interlocked.Increment(ref FocusSeq);
+    }
+}
+
+// The element under each button-down, read before the app under it acts on the press. A
+// WH_MOUSE_LL hook on the WinEvent thread sees the press first; it hands the point to a reader
+// thread and holds the input until the read is done or HoldMs passed, so the app has not yet
+// closed or changed what was pressed; a slow read also holds the button-up (UpHoldMs more), as a
+// button acts on release. A scroll's first tick (none in the WheelGapMs before) is
+// read the same way. One read is kept; `at` with "down" takes it when it is near the asked point
+// and under KeepMs old, waiting for a read still running. The read holds what `at` would answer
+// (names never show a value); nothing else sees it, and the next press replaces it.
+static class Down {
+    const int HoldMs = 60, UpHoldMs = 200, KeepMs = 2000, TakeWaitMs = 1500, Near = 4, WheelGapMs = 500;
+
+    sealed class Read {
+        public int X, Y;
+        public long At;
+        public string Json;
+        public bool Taken;
+        public readonly ManualResetEvent Done = new ManualResetEvent(false);
+    }
+
+    static readonly object gate = new object();
+    static readonly Stopwatch clock = Stopwatch.StartNew();
+    static readonly AutoResetEvent wake = new AutoResetEvent(false);
+    static Read last, pending;
+    static long lastWheel = -WheelGapMs;
+    static int wheelX, wheelY;
+    public static volatile bool Running;
+
+    // Called on the hook thread. Returns once the read is done or HoldMs passed.
+    public static void Press(int x, int y, bool wheel) {
+        long now = clock.ElapsedMilliseconds;
+        if (wheel) {
+            bool same = now - lastWheel < WheelGapMs && Math.Abs(x - wheelX) <= Near && Math.Abs(y - wheelY) <= Near;
+            lastWheel = now; wheelX = x; wheelY = y;
+            if (same) return;
+        }
+        Read r = new Read { X = x, Y = y, At = now };
+        lock (gate) { last = r; pending = r; }
+        wake.Set();
+        r.Done.WaitOne(HoldMs);
+    }
+
+    // Called on the hook thread at a button-up: waits out a read of the press still running.
+    public static void Release() {
+        Read r;
+        lock (gate) r = last;
+        if (r == null || clock.ElapsedMilliseconds - r.At > KeepMs) return;
+        r.Done.WaitOne(UpHoldMs);
+    }
+
+    public static void Start() {
+        Thread t = new Thread(Reader);
+        t.IsBackground = true;
+        t.Name = "down";
+        t.Start();
+        Running = true;
+    }
+
+    static void Reader() {
+        while (true) {
+            wake.WaitOne();
+            Read r;
+            lock (gate) { r = pending; pending = null; }
+            if (r == null) continue;
+            string json;
+            try { json = Probe.ReadAt(r.X, r.Y); } catch (Exception) { json = null; }
+            r.Json = json;
+            r.Done.Set();
+        }
+    }
+
+    // The read of the press at (x, y), or null: none near there in KeepMs, already taken, or failed.
+    public static string Take(double x, double y) {
+        if (!Running || double.IsNaN(x) || double.IsNaN(y)) return null;
+        Read r;
+        lock (gate) r = last;
+        if (r == null || r.Taken || clock.ElapsedMilliseconds - r.At > KeepMs) return null;
+        if (Math.Abs(r.X - x) > Near || Math.Abs(r.Y - y) > Near) return null;
+        if (!r.Done.WaitOne(TakeWaitMs)) return null;
+        lock (gate) {
+            if (r.Taken) return null;
+            r.Taken = true;
+        }
+        return r.Json;
     }
 }
 

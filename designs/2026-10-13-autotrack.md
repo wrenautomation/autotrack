@@ -130,14 +130,17 @@ shipped in the Mac bundle (and built on first run if missing and `swiftc` exists
 `helpers/win/autotrack-helper.exe --probe`, C# built in CI by the csc of .NET Framework 4.8 (on
 every Windows 10 and 11, so nothing to install), managed `UIAutomationClient` + P/Invoke for the
 foreground window. `--shots` and `--ocr` are the same exe. Each answer under 50 ms p95; a timeout gives `null`, never a
-stall in the hook. A click's `at` is the exception: it is asked at the click with 3 s to answer
-(only that act's write waits on it; the Windows helper can take over 1 s, and a later first ask
-could see the screen after the click).
-A null is asked again when the act is written, with `"wait":1000`, which raises the Mac helper's
-AX timeout to match (an app taking focus, or a password field turning on secure input, misses
-40 ms; asked again at once, it still missed on CI). Windows ignores `wait`. `at` is also asked
-where the pointer has rested 100 ms; a click there whose own answer has no role (a button that
-closes its window on release is often gone before the Windows helper reads it) takes that one.
+stall in the hook. A click's `at` is the exception. It is asked at button-down (a scroll: its
+first tick) with `"down":true`, `"wait":1000` and 3 s to answer; only that act's write waits on
+it. `wait` raises the Mac helper's AX timeout to match: an app taking focus misses 40 ms.
+`down` makes the Windows helper answer what it read at button-down. A low-level mouse hook sees
+the press before the app does, a reader thread reads the element under it, and the hook holds the
+press until the read is done (60 ms at most) and the button-up until it is done (200 ms more). So a
+button that closes its window on release still reads as the button. With no read within 4 px and
+2 s, it reads now. Windows ignores `wait`; Mac and Linux ignore `down`. A null is asked again
+when the act is written. `at` is also asked where the pointer has rested 100 ms (its own timer,
+not the next fold tick); a click whose own answer has no role takes that one. That rest answer is
+Linux's only read before a quick click acts: X has no passive way to hold a press.
 
 Signal adds (see Signal below):
 
@@ -584,6 +587,11 @@ The first Windows e2e ran 8.9% CPU and 270 MB with input. The fixes:
   ring is 4 frames of w×h×4 bytes, ~33 MB at 1080p).
 - Mac: the 4.2% burst at `full` was recorder 1.7%, probe 0.6%, shots 1.9%, so per-key AX reads
   are not the cause. A text act asks `focused` once, not per key. The burst rule covers it.
+- A click's element is the one under the pointer at button-down. The Windows helper reads it from
+  a low-level mouse hook before the app gets the press (see Probe protocol). Reading it when Node
+  asked gave the window behind a form that closed on release.
+- The Windows e2e pins `full` like the Mac one. A loaded runner held `lean`, which drops settle
+  and crops. `src/level.test.ts` covers the governor.
 
 ## Installers (2026-10-13, William)
 

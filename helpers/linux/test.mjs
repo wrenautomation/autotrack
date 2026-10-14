@@ -83,8 +83,10 @@ async function fixture(mode, file) {
   const p = spawn("python3", [join(repo, "test", "e2e", "linux-form.py"), mode, file], {
     stdio: "inherit",
   });
-  for (let i = 0; i < 100 && !existsSync(file); i++) await sleep(100);
-  if (!existsSync(file)) throw new Error(`${mode} fixture did not come up`);
+  // A cold runner's first GTK start (Python imports, the AT-SPI bridge) has taken over 10 s.
+  for (let i = 0; i < 300 && !existsSync(file) && p.exitCode === null; i++) await sleep(100);
+  if (!existsSync(file))
+    throw new Error(`${mode} fixture did not come up in 30 s (exit ${p.exitCode})`);
   await sleep(300);
   return { proc: p, at: JSON.parse(readFileSync(file, "utf8")) };
 }

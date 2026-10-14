@@ -96,9 +96,23 @@ export class Probe extends HelperClient {
     super({ ...opts, name: "probe" });
   }
 
-  /** `waitMs`: the helper also waits on a slow app that long (Mac AX timeout). */
-  at(x: number, y: number, timeoutMs?: number, waitMs?: number): Promise<AtAnswer | null> {
-    const p = { x: Math.round(x), y: Math.round(y), ...(waitMs ? { wait: waitMs } : {}) };
+  /**
+   * `waitMs`: the helper also waits on a slow app that long (Mac AX timeout). `down`: the act
+   * started with a press or a scroll tick here; Windows answers what it read at that moment.
+   */
+  at(
+    x: number,
+    y: number,
+    timeoutMs?: number,
+    waitMs?: number,
+    down = false,
+  ): Promise<AtAnswer | null> {
+    const p = {
+      x: Math.round(x),
+      y: Math.round(y),
+      ...(waitMs ? { wait: waitMs } : {}),
+      ...(down ? { down: true } : {}),
+    };
     return this.call("at", p, timeoutMs);
   }
   front(): Promise<FrontAnswer | null> {

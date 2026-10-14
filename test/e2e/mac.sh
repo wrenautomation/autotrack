@@ -64,8 +64,8 @@ fi
 
 step "install.sh"
 # GitHub's macOS VMs run at a load of 2 to 3 per core, so the governor would hold `lean` (no settle,
-# crops or OCR) the whole run. Pin `full` for the LaunchAgent so those are proven; the Windows e2e
-# runs unpinned.
+# crops or OCR) the whole run. Pin `full` for the LaunchAgent so those are proven (the Windows e2e
+# pins it too).
 launchctl setenv AUTOTRACK_LEVEL full
 {
   AUTOTRACK="$code" AUTOTRACK_BUNDLE="$bundle" AUTOTRACK_ENDPOINT="http://127.0.0.1:$port" \

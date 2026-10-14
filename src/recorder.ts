@@ -61,11 +61,11 @@ export const CROP_PT = 256;
 export const SEGMENT_TICK_MS = 30_000;
 export const SHIP_MS = 5 * 60_000;
 /**
- * A point act's element: asked at the click with this long to answer (only the act's own write
- * waits on it; the Windows helper can take over 1 s, and a later first ask could see the screen
- * after the click). A null is asked once more when the act is written, with the helper waiting
- * AT_WAIT_MS: on a Mac, AX misses 40 ms while the clicked app takes focus (more so a password
- * field turning on secure input).
+ * A point act's element: asked at the press (or a scroll's first tick) with this long to answer
+ * (only the act's own write waits on it) and `down`, so the Windows helper answers what it read
+ * at button-down, before the app acted on the press. The helper also waits AT_WAIT_MS on a slow
+ * app: on a Mac, AX misses 40 ms while the clicked app takes focus. A null is asked once more
+ * when the act is written.
  */
 export const AT_MS = 3000;
 export const AT_WAIT_MS = 1000;
@@ -88,7 +88,13 @@ export const TASK_GOAL_MAX = 500;
 export interface ProbeLike {
   readonly available: boolean;
   readonly running: boolean;
-  at(x: number, y: number, timeoutMs?: number, waitMs?: number): Promise<AtAnswer | null>;
+  at(
+    x: number,
+    y: number,
+    timeoutMs?: number,
+    waitMs?: number,
+    down?: boolean,
+  ): Promise<AtAnswer | null>;
   front(): Promise<FrontAnswer | null>;
   focused(timeoutMs?: number): Promise<FocusedAnswer | null>;
   perm(timeoutMs?: number): Promise<PermAnswer | null>;
@@ -242,6 +248,7 @@ export class Recorder {
   private treeBusy = false;
   private treeAt = Number.NEGATIVE_INFINITY;
   private restAskedAt = Number.NEGATIVE_INFINITY;
+  private restTimer: NodeJS.Timeout | undefined;
   private prompting = false;
   private lastRaw = Number.NEGATIVE_INFINITY;
   /** Raw inputs seen since start, for `doctor` (was the measured window active?). */
@@ -356,6 +363,7 @@ export class Recorder {
     if (this.stopped) return;
     this.stopped = true;
     for (const h of this.timers) clearInterval(h);
+    clearTimeout(this.restTimer);
     this.stopHook?.();
     this.flush();
     this.release(Number.POSITIVE_INFINITY);
@@ -512,8 +520,15 @@ export class Recorder {
     this.lastRaw = this.clock.now();
     if (this.paused) return;
     this.screen.input(...(r.type === "keydown" ? [] : ([r.x, r.y] as const)));
-    if (r.type === "move" && !(this.rest && near(this.rest, r)))
+    if (r.type === "move" && !(this.rest && near(this.rest, r))) {
       this.rest = { x: r.x, y: r.y, t: this.clock.now() };
+      // Asked REST_MS after it stopped, not on the next fold tick (up to 100 ms later): on Linux
+      // nothing reads the element at button-down, and a quick click often closes what it hit.
+      if (this.d.timers !== false) {
+        clearTimeout(this.restTimer);
+        this.restTimer = setTimeout(() => this.restTick(), REST_MS + 2);
+      }
+    }
     const t = this.t(r.t);
     if (r.type === "move") this.path.move(t, r.x, r.y);
     this.folder.push({ ...r, t } as Raw);
@@ -646,7 +661,7 @@ export class Recorder {
       if (b.press) this.path.press();
       crop = this.cropAt(b.x, b.y);
       at = c.toPhysical(b.x, b.y);
-      target = this.d.probe.at(at.x, at.y, AT_MS);
+      target = this.d.probe.at(at.x, at.y, AT_MS, AT_WAIT_MS, true);
       const rested = this.rest?.answer && near(this.rest, b) ? this.rest.answer : null;
       if (rested)
         target = target.then(async (a) => {

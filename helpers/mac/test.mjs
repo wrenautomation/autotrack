@@ -249,24 +249,57 @@ const isNode = (n) =>
     running = false;
   }
   await freshAsk(treeReq);
-  execFileSync("open", ["-a", "TextEdit"]);
-  // Wait for it in front (10 s at most), asked of lsappinfo so the helper's run loop stays still.
-  const inFront = () =>
-    execFileSync("sh", ["-c", 'lsappinfo info -only bundleid "$(lsappinfo front)"'], {
-      encoding: "utf8",
-    }).includes("com.apple.TextEdit");
-  for (let i = 0; i < 50 && !inFront(); i++) await new Promise((r) => setTimeout(r, 200));
-  await new Promise((r) => setTimeout(r, 1000)); // its window settles
+  // A document of its own: TextEdit opened bare shows an Open panel first, so which window is in
+  // front would race the checks below.
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "probe-switch-"));
+  const doc = join(dir, "probe switch.txt");
+  writeFileSync(doc, "probe switch\n");
+  execFileSync("open", ["-a", "TextEdit", doc]);
+  // Wait (15 s at most) until its window is TextEdit's front window and TextEdit is in front, asked
+  // of lsappinfo and System Events so this helper's run loop stays still.
+  const frontWindow = () => {
+    try {
+      const app = execFileSync("sh", ["-c", 'lsappinfo info -only bundleid "$(lsappinfo front)"'], {
+        encoding: "utf8",
+      });
+      if (!app.includes("com.apple.TextEdit")) return "";
+      return execFileSync(
+        "osascript",
+        ["-e", 'tell application "System Events" to name of front window of process "TextEdit"'],
+        { encoding: "utf8", timeout: 5000 },
+      ).trim();
+    } catch {
+      return "";
+    }
+  };
+  let seen = frontWindow();
+  for (let i = 0; i < 75 && !seen.startsWith("probe switch"); i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    seen = frontWindow();
+  }
   const tree = await freshAsk(treeReq);
   const fr = await freshAsk({ op: "front" });
   fresh.kill();
-  if (perm.accessibility && fr.app?.id === "com.apple.TextEdit" && fr.window)
-    check(
-      tree.nodes?.[0]?.role === "window" && tree.nodes[0].name === fr.window.title,
-      "after an app switch, the tree is the new front window's",
-    );
-  else console.log(`app switch: front is ${fr.app?.id}, check skipped`);
-  if (!running) execFileSync("osascript", ["-e", 'quit application "TextEdit"']);
+  if (perm.accessibility && fr.app?.id === "com.apple.TextEdit" && fr.window) {
+    const root = tree.nodes?.[0];
+    const ok = root?.role === "window" && root.name === fr.window.title;
+    if (!ok)
+      console.log(
+        `app switch: tree root ${root?.role}/${root?.name}, front window ${fr.window.title}, System Events ${seen}`,
+      );
+    check(ok, "after an app switch, the tree is the new front window's");
+  } else console.log(`app switch: front is ${fr.app?.id}, check skipped`);
+  try {
+    if (running)
+      execFileSync("osascript", [
+        "-e",
+        `tell application "TextEdit" to close (every document whose path is "${doc}") saving no`,
+      ]);
+  } catch {}
+  rmSync(dir, { recursive: true, force: true });
+  if (!running) execFileSync("osascript", ["-e", 'quit application "TextEdit" saving no']);
 }
 
 // A dialog in front: `front` says so, with its title, text and buttons; the tree has them too.

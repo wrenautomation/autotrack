@@ -122,6 +122,10 @@ try {
     $code = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 
     Step 'install.ps1'
+    # A loaded runner holds the governor in `lean` (no settle, crops or OCR) and the checks below
+    # need them, so pin `full` as the Mac e2e does. The user variable reaches the scheduled task;
+    # src/level.test.ts covers the governor itself.
+    [Environment]::SetEnvironmentVariable('AUTOTRACK_LEVEL', 'full', 'User')
     $env:AUTOTRACK = $code
     $env:AUTOTRACK_BUNDLE = $bundle
     $env:AUTOTRACK_ENDPOINT = "http://127.0.0.1:$port"
@@ -146,6 +150,7 @@ try {
     }
     if (-not (Running)) { Die 'recorder not running after install' }
     Native { & $cli status }
+    if (-not ((Native { & $cli status }) -match 'pinned')) { Write-Host '::warning::e2e: AUTOTRACK_LEVEL did not reach the recorder' }
 
     Step 'Drive input'
     # doctor measures the running recorder over 10 s while the input below is driven: the active cost.
@@ -279,6 +284,7 @@ try {
     Write-Host 'uninstall left nothing registered'
     if ($overBudget.Count -gt 0) { Die ($overBudget -join '; ') }
 } finally {
+    [Environment]::SetEnvironmentVariable('AUTOTRACK_LEVEL', $null, 'User')
     Copy-Item (Join-Path $data '*.log') $work -ErrorAction SilentlyContinue
     foreach ($p in @($stub, $form, $notepad)) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
 }
