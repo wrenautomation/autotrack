@@ -161,7 +161,15 @@ step "idle: OCR, doctor"
 i=0
 until find "$data/sessions" -path '*/ocr/*.json' -exec grep -lE '"text":"[^"]*([Hh]ello|Submit|Password|note\.txt)' {} + 2>/dev/null | grep -q .; do
   i=$((i + 1))
-  [ $i -lt 60 ] || die "no OCR with the known text after 180 s"
+  if [ $i -ge 60 ]; then
+    # check.mjs fails the run if no shipped OCR holds known text; this shows why.
+    echo "::warning::e2e: no OCR with the known text after 180 s"
+    "$cli" status || true
+    for f in $(find "$data/sessions" -path '*/ocr/*' -name '*.json' | head -5); do
+      echo "$f: $(head -c 300 "$f")"
+    done
+    break
+  fi
   sleep 3
 done
 echo "ocr files: $(find "$data/sessions" -path '*/ocr/*' -name '*.json' | wc -l)"
