@@ -119,10 +119,12 @@ jobs:
         run: sh helpers/linux/build.sh
       - run: pnpm install --frozen-lockfile
       - name: helper tests
+        timeout-minutes: 5
         run: dbus-run-session -- sh test/e2e/linux-x.sh node helpers/linux/test.mjs
       - name: bundle
         run: node scripts/bundle.mjs
       - name: install, drive input, ship, check, uninstall
+        timeout-minutes: 15
         run: dbus-run-session -- sh test/e2e/linux-x.sh sh test/e2e/linux.sh
       - name: logs
         if: always()

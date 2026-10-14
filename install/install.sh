@@ -291,13 +291,13 @@ linux_browsers() {
 
 copy_text() { # to the clipboard: X11, then Wayland
   if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null 2>&1; then
-    printf '%s' "$1" | wl-copy 2>/dev/null && return 0
+    printf '%s' "$1" | wl-copy >/dev/null 2>&1 && return 0
   fi
   if command -v xclip >/dev/null 2>&1; then
-    printf '%s' "$1" | xclip -selection clipboard 2>/dev/null && return 0
+    printf '%s' "$1" | xclip -selection clipboard >/dev/null 2>&1 && return 0
   fi
   if command -v xsel >/dev/null 2>&1; then
-    printf '%s' "$1" | xsel --clipboard --input 2>/dev/null && return 0
+    printf '%s' "$1" | xsel --clipboard --input >/dev/null 2>&1 && return 0
   fi
   return 1
 }

@@ -146,7 +146,10 @@ check(!JSON.stringify(focusedNote).includes("secret"), "focused: no content");
 // Clipboard: watch, then a plain copy and a password manager's copy.
 await probe.ask({ op: "watch", clipboard: true });
 await sleep(300);
-execFileSync("sh", ["-c", "printf 'autotrack helper clip' | xclip -selection clipboard"]);
+execFileSync("sh", [
+  "-c",
+  "printf 'autotrack helper clip' | xclip -selection clipboard >/dev/null 2>&1",
+]);
 for (let i = 0; i < 30 && !probe.events.some((e) => e.event === "clipboard"); i++) await sleep(100);
 const plain = probe.events.find((e) => e.event === "clipboard");
 console.log("clipboard", JSON.stringify(plain));

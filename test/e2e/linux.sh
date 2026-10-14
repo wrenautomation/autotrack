@@ -110,7 +110,8 @@ xdotool type --delay 60 hello
 xdotool key Return
 sleep 1.5
 # A copy while the text area has focus: the recorder writes it as a clipboard event.
-printf 'autotrack e2e clip 42' | xclip -selection clipboard
+# xclip stays in the background to own the selection: keep it off this script's output.
+printf 'autotrack e2e clip 42' | xclip -selection clipboard >/dev/null 2>&1
 sleep 1
 
 python3 "$repo/test/e2e/linux-form.py" form "$work/form.json" >"$work/form.log" 2>&1 &

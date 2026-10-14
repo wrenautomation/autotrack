@@ -176,8 +176,13 @@ function writeBin(stage) {
   chmodSync(join(stage, "bin", "autotrack"), 0o755);
 }
 
+/** A zip of `entries` under `cwd`: bsdtar on Mac and Windows; on Linux (GNU tar has no zip) `zip`. */
 function zip(out, cwd, entries) {
   rmSync(out, { force: true });
+  if (process.platform === "linux") {
+    run("zip", ["-q", "-X", "-r", out, ...entries], { cwd });
+    return;
+  }
   run(TAR, ["--format", "zip", "-cf", out, "-C", cwd, ...entries], {
     env: { ...process.env, COPYFILE_DISABLE: "1" },
   });
