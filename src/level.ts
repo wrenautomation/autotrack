@@ -1,8 +1,9 @@
 /**
- * The level governor. Every 10 s the recorder asks it which capture level fits the machine right
+ * The level governor. Every 2 s the recorder asks it which capture level fits the machine right
  * now: `full` on AC with a calm system, `lean` on a low battery, a busy system or when autotrack's
- * own CPU (recorder + helpers) ran over budget for 60 s, `normal` otherwise. What each level costs
- * is `LEVELS`. Pure: readings come in, so tests feed it fakes.
+ * own CPU (recorder + helpers) ran over budget for 60 s, `normal` otherwise. A burst of input that
+ * runs over budget for 10 s steps the level down one (to `lean` past twice the budget) until the
+ * burst is over. What each level costs is `LEVELS`. Pure: readings come in, so tests feed it fakes.
  */
 import type { Level } from "./events.ts";
 
@@ -19,18 +20,43 @@ export interface LevelParams {
   idleMs: number;
   /** Trees after an act that moved the screen (focus changes always ask for one). */
   treesOnScreen: boolean;
+  /** At most one tree this often. */
+  treeMs: number;
 }
 
 export const LEVELS: Record<Level, LevelParams> = {
-  full: { ringMs: 250, settleTickMs: 100, crops: true, idleMs: 1000, treesOnScreen: true },
-  normal: { ringMs: 500, settleTickMs: 150, crops: true, idleMs: 2000, treesOnScreen: true },
-  lean: { ringMs: 1000, settleTickMs: null, crops: false, idleMs: 5000, treesOnScreen: false },
+  full: {
+    ringMs: 250,
+    settleTickMs: 100,
+    crops: true,
+    idleMs: 1000,
+    treesOnScreen: true,
+    treeMs: 1000,
+  },
+  normal: {
+    ringMs: 500,
+    settleTickMs: 150,
+    crops: true,
+    idleMs: 2000,
+    treesOnScreen: true,
+    treeMs: 2000,
+  },
+  lean: {
+    ringMs: 1000,
+    settleTickMs: null,
+    crops: false,
+    idleMs: 5000,
+    treesOnScreen: false,
+    treeMs: 5000,
+  },
 };
 
-export const LEVEL_TICK_MS = 10_000;
+export const LEVEL_TICK_MS = 2_000;
 export const POWER_POLL_MS = 60_000;
 /** Own CPU and system load are judged over this window. */
 export const WINDOW_MS = 60_000;
+/** A burst: own CPU over this short window. */
+export const BURST_MS = 10_000;
 /** % of one core, recorder + helpers, on average. */
 export const CPU_BUDGET_PCT = 3;
 /** Back from a CPU-forced `lean` only under this (so it does not flap at the line). */
@@ -56,6 +82,8 @@ export interface LevelInputs {
   busy: Busy | null;
   /** Own CPU, % of one core over the last 60 s; null until 60 s of samples. */
   cpuPct: number | null;
+  /** Own CPU over the last 10 s; null until 10 s of samples. */
+  burstPct?: number | null;
 }
 
 export interface Decision {
@@ -65,8 +93,26 @@ export interface Decision {
 
 const pct = (n: number) => `${Math.round(n)}%`;
 
-/** The level for these readings. `prev` keeps a CPU-forced `lean` until CPU drops under 2%. */
+const STEP_DOWN: Record<Level, Level> = { full: "normal", normal: "lean", lean: "lean" };
+
+/**
+ * The level for these readings. `prev` keeps a CPU-forced `lean` until CPU drops under 2%, and a
+ * burst's step down until the burst drops under 2%.
+ */
 export function decide(i: LevelInputs, prev: Decision | null = null): Decision {
+  const d = calm(i, prev);
+  if (d.level === "lean" || i.burstPct === null || i.burstPct === undefined) return d;
+  const b = i.burstPct;
+  const why = `burst: own cpu ${b.toFixed(1)}% over 10 s`;
+  if (b > 2 * CPU_BUDGET_PCT) return { level: "lean", why };
+  const held = prev?.why.startsWith("burst") ?? false;
+  if (b > CPU_BUDGET_PCT || (held && b >= CPU_RESUME_PCT))
+    return { level: STEP_DOWN[d.level], why };
+  return d;
+}
+
+/** The level without the burst rule. */
+function calm(i: LevelInputs, prev: Decision | null): Decision {
   const p = i.power;
   if (p && !p.ac && p.battery !== null && p.battery < LOW_BATTERY_PCT)
     return { level: "lean", why: `battery ${pct(p.battery)}` };
@@ -133,12 +179,13 @@ export interface GovernorOptions {
   powerPollMs?: number;
 }
 
-/** Ticks every 10 s; answers the decision when the level changed (the first tick always does). */
+/** Ticks every 2 s; answers the decision when the level changed (the first tick always does). */
 export class Governor {
   private current: Decision | null = null;
   private power: Power | null = null;
   private powerAt = Number.NEGATIVE_INFINITY;
   private readonly meter = new CpuMeter();
+  private readonly burst = new CpuMeter(BURST_MS);
   private readonly o: GovernorOptions;
 
   constructor(o: GovernorOptions) {
@@ -157,6 +204,11 @@ export class Governor {
     return this.meter.pct();
   }
 
+  /** Own CPU over the last 10 s. */
+  get burstPct(): number | null {
+    return this.burst.pct();
+  }
+
   /** The last power reading (null: not known). */
   get powerNow(): Power | null {
     return this.power;
@@ -169,10 +221,21 @@ export class Governor {
       this.powerAt = now;
       this.power = await this.o.power().catch(() => null);
     }
-    this.meter.add(this.o.now(), await this.o.cpu().catch(() => ({})));
+    const cpu = await this.o.cpu().catch(() => ({}));
+    const t = this.o.now();
+    this.meter.add(t, cpu);
+    this.burst.add(t, cpu);
     const next: Decision = this.o.pinned
       ? { level: this.o.pinned, why: "pinned (AUTOTRACK_LEVEL)" }
-      : decide({ power: this.power, busy: this.o.busy(), cpuPct: this.meter.pct() }, this.current);
+      : decide(
+          {
+            power: this.power,
+            busy: this.o.busy(),
+            cpuPct: this.meter.pct(),
+            burstPct: this.burst.pct(),
+          },
+          this.current,
+        );
     const changed = next.level !== this.current?.level;
     this.current = changed ? next : (this.current as Decision);
     if (!changed && next.why !== this.current.why) this.current = next;

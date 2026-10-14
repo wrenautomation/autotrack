@@ -1,7 +1,8 @@
 # Windows end to end (CI only: it sends real input). Installs the built bundle with install.ps1 and a
 # fake install code pointing at the local S3 stub, types into Notepad and a password form with
 # SendInput, waits idle for OCR and prints `doctor` (level and cost), stops, ships, checks what the
-# stub received, then uninstalls and checks nothing is left registered.
+# stub received, then uninstalls and checks nothing is left registered. Fails when the cost while
+# input was driven is over 6% CPU over 10 s or 200 MB RSS.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File test\e2e\win.ps1   (after scripts/bundle.mjs)
 $ErrorActionPreference = 'Stop'
@@ -223,10 +224,24 @@ try {
     if ($doctor) { [void]$doctor.WaitForExit(60000) }
     Write-Host '-- doctor while input was driven:'
     Get-Content $doctorLog -ErrorAction SilentlyContinue
+    # The active budget: CI fails past 6% over the 10 s burst (driven input is denser than real use;
+    # the real-use target stays 3% on average) or 200 MB peak RSS. Checked after the rest.
+    $activeLog = Get-Content $doctorLog -Raw -ErrorAction SilentlyContinue
+    $cpu = if ($activeLog -match 'CPU ([0-9.]+)% of one core') { [double]$Matches[1] } else { $null }
+    $rss = if ($activeLog -match 'RSS (\d+) MB peak') { [int]$Matches[1] } else { $null }
+    $inputs = if ($activeLog -match 'active, (\d+) inputs') { [int]$Matches[1] } else { 0 }
+    Write-Host "::notice::e2e windows active input: CPU $cpu% over 10 s, RSS $rss MB peak, $inputs inputs (CI limits 6%, 200 MB)"
+    $overBudget = @()
+    if ($null -eq $cpu -or $null -eq $rss) { $overBudget += 'doctor did not report CPU and RSS while input was driven' }
+    else {
+        if ($rss -gt 200) { $overBudget += "active RSS $rss MB is over 200 MB" }
+        if ($cpu -gt 6) { $overBudget += "10 s burst CPU $cpu% is over 6%" }
+    }
+    if ($inputs -eq 0) { Write-Host '::warning::e2e: doctor saw no input in its window' }
     Write-Host '-- doctor idle:'
     Native { & $cli doctor }
     # 256 points at the primary display's native pixels, from the installed shots helper.
-    $disp = Native { '{"id":1,"op":"displays"}' | & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $app 'helpers\win\probe.ps1') --shots } | ConvertFrom-Json
+    $disp = Native { '{"id":1,"op":"displays"}' | & (Join-Path $app 'helpers\win\autotrack-helper.exe') --shots } | ConvertFrom-Json
     $primary = @($disp.displays | Where-Object { $_.primary })[0]
     $cropPx = [math]::Round(256 * $primary.os.scale)
     Write-Host "crop at native pixels: $cropPx px"
@@ -262,6 +277,7 @@ try {
         Start-Sleep -Seconds 1
     }
     Write-Host 'uninstall left nothing registered'
+    if ($overBudget.Count -gt 0) { Die ($overBudget -join '; ') }
 } finally {
     Copy-Item (Join-Path $data '*.log') $work -ErrorAction SilentlyContinue
     foreach ($p in @($stub, $form, $notepad)) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }

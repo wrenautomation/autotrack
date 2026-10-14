@@ -3,7 +3,7 @@
  * (fold ticks, frame ring, front-app poll, idle frames, segment close, ship) and pause state.
  * Signal rides along: each act's outcome (`out`) and latest tree, accessibility trees on focus
  * and after a screen change, dialogs, clipboard changes, and the task marker's prompt. Quality:
- * the level governor (every 10 s), a fresh before-frame at button-down, after-frames on settle,
+ * the level governor (every 2 s), a fresh before-frame at button-down, after-frames on settle,
  * the cursor approach path, native crops, `shot` events, segment stats and idle-time OCR.
  * Every dependency comes in, so tests drive it with fakes and a hand-run clock.
  */
@@ -75,8 +75,8 @@ export const AT_WAIT_MS = 1000;
  * takes this one.
  */
 export const REST_MS = 100;
-/** Trees: at most one a second. */
-export const TREE_MIN_MS = 1000;
+/** Rest asks: at most one this often (clicks, drags and scrolls ask every time). */
+export const REST_GAP_MS = 1000;
 /** An incoming `tree` string over this many bytes is stored as `trees/<n>.txt`. */
 export const TREE_INLINE_BYTES = 2048;
 /** How long a clipboard change waits for the focused element (secure or not). */
@@ -169,7 +169,11 @@ export interface Status {
   why: string;
   /** Own CPU (recorder + helpers, no OCR), % of one core over 60 s; null in the first minute. */
   cpuPct: number | null;
-  /** Each helper's cumulative CPU ms and resident MB at the last level tick. */
+  /** The same over the last 10 s; null in the first 10 s. */
+  burstPct: number | null;
+  /** Raw inputs (keys, clicks, moves, scrolls) seen since start. */
+  inputs: number;
+  /** Each helper's cumulative CPU ms and resident MB at the last level tick (or `statusNow`). */
   helpers: Record<string, Usage | null>;
   ocr: { on: boolean; waiting: number; running: boolean; cpuMs: number };
 }
@@ -237,8 +241,11 @@ export class Recorder {
   private treeWanted = false;
   private treeBusy = false;
   private treeAt = Number.NEGATIVE_INFINITY;
+  private restAskedAt = Number.NEGATIVE_INFINITY;
   private prompting = false;
   private lastRaw = Number.NEGATIVE_INFINITY;
+  /** Raw inputs seen since start, for `doctor` (was the measured window active?). */
+  private inputs = 0;
   /** Where the pointer rests, since when, and its element once asked. */
   private rest: { x: number; y: number; t: number; answer?: Promise<AtAnswer | null> } | null =
     null;
@@ -394,6 +401,9 @@ export class Recorder {
       level: this.governor.level,
       why: this.governor.decision?.why ?? "",
       cpuPct: this.governor.cpuPct === null ? null : Math.round(this.governor.cpuPct * 100) / 100,
+      burstPct:
+        this.governor.burstPct === null ? null : Math.round(this.governor.burstPct * 100) / 100,
+      inputs: this.inputs,
       helpers: this.helpers,
       ocr: {
         on: this.ocr !== null,
@@ -411,7 +421,7 @@ export class Recorder {
   }
 
   /**
-   * Every 10 s: the governor's reading; a `level` event when the level changed (the first tick
+   * Every 2 s: the governor's reading; a `level` event when the level changed (the first tick
    * always writes one). Helper restarts go into the segment's stats.
    */
   async levelTick(): Promise<Decision | null> {
@@ -487,6 +497,7 @@ export class Recorder {
 
   onRaw(r: Raw): void {
     if (this.stopped) return;
+    this.inputs++;
     this.ocr?.input(); // any input stops OCR at once, paused or not
     if (hotkey(r, "p")) {
       if (this.userPaused) this.resume();
@@ -516,11 +527,13 @@ export class Recorder {
   /** Ask for the element under a pointer that has rested REST_MS. */
   private restTick(): void {
     const r = this.rest;
-    if (!r || r.answer || this.clock.now() - r.t < REST_MS) return;
+    const now = this.clock.now();
+    if (!r || r.answer || now - r.t < REST_MS || now - this.restAskedAt < REST_GAP_MS) return;
     if (this.paused || !this.d.probe.running) {
       this.rest = null;
       return;
     }
+    this.restAskedAt = now;
     const p = this.coords().toPhysical(r.x, r.y);
     r.answer = this.d.probe.at(p.x, p.y, AT_MS);
   }
@@ -564,7 +577,7 @@ export class Recorder {
 
   /**
    * Capture the front window's tree when one is wanted (a focus change, an act that moved the
-   * screen), at most once a second, one at a time. Its event's t is when the answer came (an act
+   * screen), at most once per the level's `treeMs`, one at a time. Its event's t is when the answer came (an act
    * that began during the walk is in the chain already); the same tree twice is written once.
    */
   async treeTick(): Promise<void> {
@@ -575,7 +588,7 @@ export class Recorder {
       return;
     }
     const now = this.clock.now();
-    if (now - this.treeAt < TREE_MIN_MS) return;
+    if (now - this.treeAt < LEVELS[this.governor.level].treeMs) return;
     this.treeWanted = false;
     this.treeBusy = true;
     this.treeAt = now;

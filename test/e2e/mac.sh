@@ -97,6 +97,7 @@ done
 step "Drive input"
 # doctor measures the running recorder over 10 s while the input below is driven: the active cost.
 "$cli" doctor >"$work/doctor-active.log" 2>&1 &
+doctor=$!
 : >"$work/note.txt"
 open -a TextEdit "$work/note.txt"
 sleep 3
@@ -180,8 +181,14 @@ case ",$soft," in
   echo "ocr files: $(find "$data/sessions" -path '*/ocr/*' -name '*.json' | wc -l | tr -d ' ')"
   ;;
 esac
+wait "$doctor" 2>/dev/null || true
 echo "-- doctor while input was driven:"
 cat "$work/doctor-active.log" || true
+# Reported, not enforced: the Mac runner is loaded 2 to 3 per core and pinned to full.
+cpu=$(sed -n 's/.*CPU \([0-9.]*\)% of one core.*/\1/p' "$work/doctor-active.log" | head -1)
+rss=$(sed -n 's/.*RSS \([0-9]*\) MB peak.*/\1/p' "$work/doctor-active.log" | head -1)
+inputs=$(sed -n 's/.*active, \([0-9]*\) inputs.*/\1/p' "$work/doctor-active.log" | head -1)
+echo "::notice::e2e mac active input: CPU ${cpu:-?}% over 10 s, RSS ${rss:-?} MB peak, ${inputs:-0} inputs"
 echo "-- doctor idle:"
 "$cli" doctor || true
 crop_px=$(swift -e 'import CoreGraphics; let d = CGMainDisplayID(); print(Int((256 * Double(CGDisplayCopyDisplayMode(d)!.pixelWidth) / Double(CGDisplayBounds(d).width)).rounded()))' 2>/dev/null || true)

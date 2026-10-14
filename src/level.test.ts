@@ -52,6 +52,30 @@ describe("decide", () => {
   });
 });
 
+describe("decide: bursts", () => {
+  it("a 10 s burst over 3% steps down one level, over 6% to lean", () => {
+    expect(decide(inputs({ burstPct: 2.9 })).level).toBe("full");
+    expect(decide(inputs({ burstPct: 4.2 }))).toEqual({
+      level: "normal",
+      why: "burst: own cpu 4.2% over 10 s",
+    });
+    expect(decide(inputs({ burstPct: 4.2, power: { ac: false, battery: 50 } })).level).toBe("lean");
+    expect(decide(inputs({ burstPct: 6.5 }))).toEqual({
+      level: "lean",
+      why: "burst: own cpu 6.5% over 10 s",
+    });
+    expect(decide(inputs({ burstPct: null })).level).toBe("full");
+  });
+
+  it("the step down holds until the burst is under 2%; a lean for another reason wins", () => {
+    const stepped = decide(inputs({ burstPct: 7 }));
+    expect(decide(inputs({ burstPct: 2.5 }), stepped).level).toBe("normal");
+    expect(decide(inputs({ burstPct: 1.9 }), stepped).level).toBe("full");
+    expect(decide(inputs({ burstPct: 2.5 })).level).toBe("full"); // no burst before: no hold
+    expect(decide(inputs({ burstPct: 9, cpuPct: 4 })).why).toBe("own cpu 4.0% over 60 s");
+  });
+});
+
 describe("CpuMeter", () => {
   it("is null until 50 s of a 60 s window are covered, then % of one core", () => {
     const m = new CpuMeter();
@@ -128,6 +152,24 @@ describe("Governor", () => {
     }
     expect(s.g.level).toBe("lean");
     expect(s.g.cpuPct).toBeCloseTo(5);
+  });
+
+  it("a burst turns the level down within 10 s and back once it is over", async () => {
+    const s = make();
+    let cpu = 0;
+    const levels: string[] = [];
+    for (let t = 0; t <= 40_000; t += 2_000) {
+      s.at(t);
+      if (t > 0) cpu += t <= 20_000 ? 2_000 * 0.08 : 2_000 * 0.005; // 8% of a core, then 0.5%
+      s.cpu(cpu);
+      await s.g.tick();
+      levels.push(s.g.level);
+    }
+    expect(levels[0]).toBe("full");
+    expect(levels.indexOf("lean")).toBeGreaterThan(0);
+    expect(levels.indexOf("lean")).toBeLessThanOrEqual(5); // by 10 s
+    expect(levels.at(-1)).toBe("full");
+    expect(s.g.burstPct).toBeCloseTo(0.5);
   });
 
   it("polls power once a minute", async () => {

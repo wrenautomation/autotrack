@@ -221,15 +221,23 @@ interface Cost {
   why: string;
   /** % of one core over the window, recorder + helpers (OCR apart). */
   cpuPct: number;
-  /** Resident MB, recorder + helpers. */
+  /** Resident MB, recorder + helpers, at the end of the window. */
   rssMb: number;
+  /** The most of `rssMb` seen in the window. */
+  peakRssMb: number;
+  /** Raw inputs in the window: 0 means the cost is the idle one. */
+  inputs: number;
   parts: Record<string, { cpuPct: number; rssMb: number }>;
   ocrCpuMs: number;
   of: string;
 }
 
-/** Cost between two statuses `ms` apart. */
-function costOf(a: Status, b: Status, ms: number, of: string): Cost {
+/** Resident MB of the recorder and its helpers in one status. */
+const totalRss = (s: Status) =>
+  s.rssMb + Object.values(s.helpers ?? {}).reduce((n, u) => n + (u?.rssMb ?? 0), 0);
+
+/** Cost between two statuses `ms` apart; `between` are the statuses read in the window. */
+export function costOf(a: Status, b: Status, ms: number, of: string, between: Status[] = []): Cost {
   const parts: Cost["parts"] = {
     recorder: { cpuPct: ((b.cpuUs - a.cpuUs) / 1000 / ms) * 100, rssMb: b.rssMb },
   };
@@ -240,11 +248,14 @@ function costOf(a: Status, b: Status, ms: number, of: string): Cost {
   }
   const sum = (f: (p: { cpuPct: number; rssMb: number }) => number) =>
     Object.values(parts).reduce((n, p) => n + f(p), 0);
+  const rssMb = Math.round(sum((p) => p.rssMb));
   return {
     level: b.level,
     why: b.why,
     cpuPct: sum((p) => p.cpuPct),
-    rssMb: Math.round(sum((p) => p.rssMb)),
+    rssMb,
+    peakRssMb: Math.round(Math.max(rssMb, ...between.map(totalRss))),
+    inputs: Math.max(0, (b.inputs ?? 0) - (a.inputs ?? 0)),
     parts,
     ocrCpuMs: b.ocr?.cpuMs ?? 0,
     of,
@@ -252,17 +263,22 @@ function costOf(a: Status, b: Status, ms: number, of: string): Cost {
 }
 
 /**
- * CPU % of one core and RSS over 10 s, recorder and helpers: the running recorder's, or a
- * throwaway one in-process.
+ * CPU % of one core and RSS over 10 s, recorder and helpers: the running recorder's (RSS read
+ * every 2 s for the peak), or a throwaway one in-process.
  */
 async function measure(data: string): Promise<Cost> {
   const first = (await send(data, "status")) as Status | null;
   if (first?.pid) {
     const t = Date.now();
-    await new Promise((r) => setTimeout(r, MEASURE_MS));
-    const second = (await send(data, "status")) as Status | null;
-    if (second?.pid === first.pid)
-      return costOf(first, second, Date.now() - t, `running recorder (pid ${first.pid})`);
+    const seen: Status[] = [];
+    for (let i = 0; i < MEASURE_MS / 2000; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const s = (await send(data, "status")) as Status | null;
+      if (s?.pid === first.pid) seen.push(s);
+    }
+    const last = seen.at(-1);
+    if (last)
+      return costOf(first, last, Date.now() - t, `running recorder (pid ${first.pid})`, seen);
   }
   const tmp = mkdtempSync(join(tmpdir(), "autotrack-doctor-"));
   const quiet = () => {};
@@ -354,11 +370,15 @@ async function doctor(data: string): Promise<number> {
       .map(([k, p]) => `${k} ${f(p)}`)
       .join(", ");
   console.log(`     level ${m.level} (${m.why})`);
+  const use = m.inputs > 0 ? `active, ${m.inputs} inputs` : "idle";
   line(
     m.cpuPct < 3,
-    `CPU ${m.cpuPct.toFixed(2)}% of one core (budget 3%): ${each((p) => `${p.cpuPct.toFixed(2)}%`)}; ${m.of}`,
+    `CPU ${m.cpuPct.toFixed(2)}% of one core over 10 s, ${use} (budget 3% on average): ${each((p) => `${p.cpuPct.toFixed(2)}%`)}; ${m.of}`,
   );
-  line(m.rssMb < 200, `RSS ${m.rssMb} MB (budget 200 MB): ${each((p) => `${p.rssMb} MB`)}`);
+  line(
+    m.peakRssMb < 200,
+    `RSS ${m.peakRssMb} MB peak, ${use} (budget 200 MB): ${each((p) => `${p.rssMb} MB`)} at the end`,
+  );
   console.log(`     OCR (idle time only, not in the budget): ${m.ocrCpuMs} ms CPU this run`);
   console.log(warnings ? `${warnings} warning(s)` : "all good");
   return warnings ? 1 : 0;
