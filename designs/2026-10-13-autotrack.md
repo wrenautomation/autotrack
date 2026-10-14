@@ -548,6 +548,13 @@ Where the build is more exact than the bullets above. Field names are unchanged.
 - Measured (`doctor`, 10 s, idle, M-series Mac at 2×, pinned level): full 1.42% of a core and
   128 MB; normal 1.42%, 109 MB; lean 1.23%, 95 MB. OCR helper: 0.5 to 0.8 s CPU and 48 MB for a
   640×200 image. The CI e2e prints `doctor` with input running and again idle, on both OSes.
+  CI (2026-10-14): Mac at full, 4.2% and 127 MB with input, 0.8% and 129 MB idle. Windows at
+  normal, 8.9% and 270 MB with input (the probe's UI Automation reads take 6.9%), 0.3% and 91 MB
+  idle. The 10 s input window is a burst, not the average, but it is over budget on Windows.
+- GitHub's macOS VMs run at a load of 2 to 3 per core, so the Mac e2e pins `full`; unpinned they
+  hold `lean`. The Windows e2e runs unpinned and picks `normal` (no load average there).
+- The Windows helpers are PowerShell 5.1 processes of about 105 MB each after startup. Every 30 s
+  each one collects and trims its working set, which brings them to about 20 MB until used.
 
 ## Decision log
 
