@@ -36,6 +36,7 @@ node "$repo/test/e2e/s3-stub.mjs" --root "$work/s3" --key-id "$key_id" --secret 
 stub=$!
 form=""
 cleanup() {
+  launchctl unsetenv AUTOTRACK_LEVEL 2>/dev/null || true
   kill "$stub" 2>/dev/null || true
   [ -n "$form" ] && kill "$form" 2>/dev/null || true
   cp "$data"/*.log "$work/" 2>/dev/null || true
@@ -62,6 +63,10 @@ if ! sh "$repo/test/e2e/mac-tcc.sh" "$app/node/node" "$app/helpers/mac/probe" "$
 fi
 
 step "install.sh"
+# GitHub's macOS VMs run at a load of 2 to 3 per core, so the governor would hold `lean` (no settle,
+# crops or OCR) the whole run. Pin `full` for the LaunchAgent so those are proven; the Windows e2e
+# runs unpinned.
+launchctl setenv AUTOTRACK_LEVEL full
 {
   AUTOTRACK="$code" AUTOTRACK_BUNDLE="$bundle" AUTOTRACK_ENDPOINT="http://127.0.0.1:$port" \
     AUTOTRACK_PERM_TIMEOUT=60 AUTOTRACK_NO_BROWSER=1 sh "$repo/install/install.sh" 2>&1 && rc=0 || rc=$?
@@ -87,6 +92,7 @@ until "$cli" status >/dev/null 2>&1; do
   sleep 1
 done
 "$cli" status
+"$cli" status | grep -q 'pinned' || echo "::warning::e2e: AUTOTRACK_LEVEL did not reach the LaunchAgent"
 
 step "Drive input"
 # doctor measures the running recorder over 10 s while the input below is driven: the active cost.
@@ -163,7 +169,7 @@ case ",$soft," in
 *,screen,*) echo "::warning::e2e: no Screen Recording: no frames to read" ;;
 *)
   i=0
-  until grep -rlsE '"text":"[^"]*([Hh]ello|Submit)' "$data/sessions" >/dev/null 2>&1; do
+  until find "$data/sessions" -path '*/ocr/*.json' -exec grep -lE '"text":"[^"]*([Hh]ello|Submit)' {} + 2>/dev/null | grep -q .; do
     i=$((i + 1))
     if [ $i -ge 60 ]; then
       echo "::warning::e2e: no OCR with the known text after 180 s"

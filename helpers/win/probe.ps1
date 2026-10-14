@@ -132,6 +132,17 @@ using System.Text;
 // Shots mode: grab a display into a ring of 4 DIB sections, hash it, write a JPEG on request.
 // C# 5 only (Windows PowerShell 5.1 compiles it).
 public static class AutotrackShots {
+    // Every 30 s: collect, then hand the working set back to Windows. Most of a PowerShell
+    // process is runtime pages it touched once at startup; they stay out until used again.
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")] static extern bool SetProcessWorkingSetSize(IntPtr p, IntPtr min, IntPtr max);
+    static System.Threading.Timer trimmer;
+    public static void StartTrim() {
+        trimmer = new System.Threading.Timer(delegate {
+            GC.Collect();
+            SetProcessWorkingSetSize(GetCurrentProcess(), new IntPtr(-1), new IntPtr(-1));
+        }, null, 30000, 30000);
+    }
     [StructLayout(LayoutKind.Sequential)]
     struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -537,6 +548,7 @@ public static class AutotrackShots {
 
     public static int Run() {
         EnableDpiAwareness();
+        StartTrim();
         StreamReader input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
         Stream output = Console.OpenStandardOutput();
         string line;
@@ -566,6 +578,17 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 public static class AutotrackNative {
+    // Every 30 s: collect, then hand the working set back to Windows. Most of a PowerShell
+    // process is runtime pages it touched once at startup; they stay out until used again.
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")] static extern bool SetProcessWorkingSetSize(IntPtr p, IntPtr min, IntPtr max);
+    static System.Threading.Timer trimmer;
+    public static void StartTrim() {
+        trimmer = new System.Threading.Timer(delegate {
+            GC.Collect();
+            SetProcessWorkingSetSize(GetCurrentProcess(), new IntPtr(-1), new IntPtr(-1));
+        }, null, 30000, 30000);
+    }
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -1243,6 +1266,7 @@ function Invoke-Op($req) {
 # which ConvertFrom-Json refuses (the shots helper's StreamReader skips it by itself).
 $stdin = New-Object System.IO.StreamReader -ArgumentList ([Console]::OpenStandardInput()), (New-Object System.Text.UTF8Encoding -ArgumentList $false)
 [AutotrackBg]::Open()
+[AutotrackNative]::StartTrim()
 Write-Stage 'ready'
 while ($true) {
     $line = $stdin.ReadLine()
