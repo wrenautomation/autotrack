@@ -21,6 +21,15 @@
 # Run through `iex`, so it never calls `exit` (that would close the window): errors throw.
 
 $ErrorActionPreference = 'Stop'
+# Started from PowerShell 7, Windows PowerShell inherits 7's module path and can't load its own
+# modules (Get-FileHash, ScheduledTasks, ...). Use the 5.1 defaults.
+if ($PSVersionTable.PSVersion.Major -le 5) {
+    $env:PSModulePath = @(
+        (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'WindowsPowerShell\Modules'),
+        (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'),
+        (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules')
+    ) -join ';'
+}
 $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the progress bar on
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
