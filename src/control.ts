@@ -17,11 +17,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dataDir } from "./config.ts";
 
-export type Command = "stop" | "pause" | "resume" | "status" | "task";
+export type Command = "stop" | "pause" | "resume" | "status" | "task" | "update";
 export type Request = { op: Command } | { op: "web"; event: unknown };
 
 export const MAX_LINE = 256 * 1024;
-const COMMANDS: string[] = ["stop", "pause", "resume", "status", "task"];
+const COMMANDS: string[] = ["stop", "pause", "resume", "status", "task", "update"];
 
 /**
  * The socket or pipe for a data dir. Mac: `<data>/control.sock` (a tmpdir path when that is too

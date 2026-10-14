@@ -81,6 +81,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: cmd
         run: powershell -NoProfile -ExecutionPolicy Bypass -File test\e2e\win.ps1
+      - name: self-update and rollback (windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 12
+        run: node test/e2e/update.mjs
 
       - name: logs
         if: always()
@@ -126,6 +130,9 @@ jobs:
       - name: install, drive input, ship, check, uninstall
         timeout-minutes: 15
         run: dbus-run-session -- sh test/e2e/linux-x.sh sh test/e2e/linux.sh
+      - name: self-update and rollback
+        timeout-minutes: 12
+        run: dbus-run-session -- sh test/e2e/linux-x.sh node test/e2e/update.mjs
       - name: logs
         if: always()
         uses: actions/upload-artifact@v4

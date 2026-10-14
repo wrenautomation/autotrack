@@ -104,7 +104,7 @@ describe("uninstall", () => {
   });
 
   it("Windows: task, Run key and PATH go; the app dir is removed after exit", async () => {
-    const later: string[] = [];
+    const later: string[][] = [];
     const { d, calls } = deps({ platform: "win32", removeLater: (p) => later.push(p) });
     await uninstall(d);
     expect(calls.slice(0, 3)).toEqual([
@@ -114,7 +114,7 @@ describe("uninstall", () => {
     ]);
     expect(calls[3]).toMatch(/^powershell\.exe .*SetEnvironmentVariable\('Path'/);
     expect(calls.slice(4)).toEqual(["stop", "host"]);
-    expect(later).toEqual([data]);
+    expect(later).toEqual([[data]]);
     expect(existsSync(join(data, "config.json"))).toBe(false);
     expect(existsSync(join(data, "app"))).toBe(true); // left for removeLater
   });

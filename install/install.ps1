@@ -1,5 +1,6 @@
 # autotrack installer for Windows (Windows PowerShell 5.1). No admin, no Node needed.
-# Re-running it updates in place.
+# Re-running it updates in place. The recorder also updates itself (src/update.ts): each version
+# lives in <data>\versions\<v> and <data>\app is a junction to the current one.
 #
 #   powershell -c "$env:AUTOTRACK='<install code>'; irm https://raw.githubusercontent.com/wrenautomation/autotrack/main/install/install.ps1 | iex"
 #
@@ -53,7 +54,8 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the pro
     $app = Join-Path $data 'app'
     $node = Join-Path $app 'node\node.exe'
     $cli = Join-Path $app 'dist\cli.js'
-    $vbs = Join-Path $app 'autotrack.vbs'
+    $versions = Join-Path $data 'versions'
+    $vbs = Join-Path $data 'autotrack.vbs'
     $ext = Join-Path $data 'extension'
     $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
     $launch = "`"$wscript`" //B //Nologo `"$vbs`""
@@ -158,7 +160,8 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the pro
                 $new = Join-Path $tmp 'app.new'
             } else {
                 New-Item -ItemType Directory -Force -Path $data | Out-Null
-                $new = Join-Path $data 'app.new'
+                New-Item -ItemType Directory -Force -Path $versions | Out-Null
+                $new = Join-Path $versions 'new'
                 if (Test-Path -LiteralPath $new) { Remove-Item -LiteralPath $new -Recurse -Force }
             }
             Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -183,18 +186,34 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the pro
                 Start-Sleep -Milliseconds 500
             }
             Get-Process -Name node -ErrorAction SilentlyContinue |
-                Where-Object { $_.Path -and $_.Path.StartsWith($app + '\', [StringComparison]::OrdinalIgnoreCase) } |
+                Where-Object { $_.Path -and ($_.Path.StartsWith($app + '\', [StringComparison]::OrdinalIgnoreCase) -or $_.Path.StartsWith($versions + '\', [StringComparison]::OrdinalIgnoreCase)) } |
                 Stop-Process -Force -ErrorAction SilentlyContinue
             Start-Sleep -Milliseconds 300
 
-            $oldApp = Join-Path $data 'app.old'
-            if (Test-Path -LiteralPath $oldApp) { Remove-Item -LiteralPath $oldApp -Recurse -Force }
-            if (Test-Path -LiteralPath $app) {
+            # versions\<v>, then point the app junction at it. An install before 0.3.0 left a real
+            # app folder: it goes. A junction is removed as a link (never Remove-Item -Recurse on it).
+            $version = (Get-Content -Raw -LiteralPath (Join-Path $new 'package.json') | ConvertFrom-Json).version
+            if ($version -notmatch '^\d+\.\d+\.\d+') { Die "bad version in the bundle: $version" }
+            $here = Join-Path $versions $version
+            $item = Get-Item -LiteralPath $app -Force -ErrorAction SilentlyContinue
+            if ($item -and $item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                [IO.Directory]::Delete($app, $false)
+            } elseif ($item) {
+                $oldApp = Join-Path $data 'app.old'
+                if (Test-Path -LiteralPath $oldApp) { Remove-Item -LiteralPath $oldApp -Recurse -Force }
                 try { Move-Item -LiteralPath $app -Destination $oldApp } catch { Die "could not replace $app (in use?): $($_.Exception.Message)" }
+                Remove-Item -LiteralPath $oldApp -Recurse -Force -ErrorAction SilentlyContinue
             }
-            Move-Item -LiteralPath $new -Destination $app
-            if (Test-Path -LiteralPath $oldApp) { Remove-Item -LiteralPath $oldApp -Recurse -Force -ErrorAction SilentlyContinue }
-            Say "Installed $((Get-Content -LiteralPath (Join-Path $app 'VERSION')).Trim()) in $app"
+            if (Test-Path -LiteralPath $here) {
+                try { Remove-Item -LiteralPath $here -Recurse -Force } catch { Die "could not replace $here (in use?): $($_.Exception.Message)" }
+            }
+            Move-Item -LiteralPath $new -Destination $here
+            New-Item -ItemType Junction -Path $app -Target $here | Out-Null
+            # A fresh install starts clean: no pending rollback, other versions gone.
+            Remove-Item -LiteralPath (Join-Path $data 'update.json') -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -LiteralPath $versions -Directory | Where-Object { $_.Name -ne $version } |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            Say "Installed $((Get-Content -LiteralPath (Join-Path $app 'VERSION')).Trim()) in $here"
 
             Quiet { & $node (Join-Path $app 'install\setup.mjs') }
             if ($LASTEXITCODE -ne 0) { Die 'setup failed' }
@@ -239,15 +258,17 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the pro
             }
             if (-not (($env:Path -split ';') -contains $app)) { $env:Path = "$env:Path;$app" }
 
-            # Hidden launcher: wscript runs node with no console window and waits; a crash (non-zero
-            # exit) restarts it after 30 s, `autotrack stop` (exit 0) ends it. Like launchd KeepAlive.
+            # Hidden launcher, outside the versions so an update never touches it: wscript runs node
+            # with no console window and waits. Exit 75 (an update or a rollback) starts it again at
+            # once, a crash after 30 s, `autotrack stop` (exit 0) ends it. Like launchd KeepAlive.
             $q = { param($s) $s -replace '"', '""' }
             $lines = @('Set sh = CreateObject("WScript.Shell")')
+            $lines += 'sh.Environment("PROCESS")("AUTOTRACK_SUPERVISED") = "1"'
             if ($env:AUTOTRACK_DIR) { $lines += 'sh.Environment("PROCESS")("AUTOTRACK_DIR") = "' + (& $q $data) + '"' }
             $lines += 'Do'
             $lines += '  rc = sh.Run("""' + (& $q $node) + '"" ""' + (& $q $cli) + '"" start", 0, True)'
             $lines += '  If rc = 0 Then Exit Do'
-            $lines += '  WScript.Sleep 30000'
+            $lines += '  If rc <> 75 Then WScript.Sleep 30000'
             $lines += 'Loop'
             $lines += 'WScript.Quit rc'
             Set-Content -LiteralPath $vbs -Value $lines -Encoding Unicode

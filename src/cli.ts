@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * autotrack start|stop|pause|resume|status|ship|doctor|uninstall.
+ * autotrack start|stop|pause|resume|status|task|ship|doctor|update|selftest|uninstall.
  * `start` runs in the foreground; the login item runs it. stop, pause, resume and status talk to
  * it over the control socket; ship and uninstall work on the data dir.
  */
@@ -24,6 +24,7 @@ import { checkFrames, openShots, ShotsCapturer } from "./capture.ts";
 import { type Config, dataDir, loadConfig, sessionsDir } from "./config.ts";
 import { type Command, lock, type Request, runningPid, send, serve } from "./control.ts";
 import { type Coords, coordsFor } from "./coords.ts";
+import { BEAT_MS, Heart, type Heartbeat, type ShipStatus } from "./heartbeat.ts";
 import { startHook, uiohook } from "./hook.ts";
 import { pinnedLevel } from "./level.ts";
 import { linuxDoctor, linuxPower, osRelease } from "./linux.ts";
@@ -32,10 +33,36 @@ import { ocrHelper } from "./ocr.ts";
 import { helperCommand, openProbe, PACKAGE_ROOT } from "./probe.ts";
 import { ask } from "./prompt.ts";
 import { Recorder, type Status } from "./recorder.ts";
-import { checkShip, noShipper, type Shipper, shipperFor } from "./ship.ts";
+import {
+  checkShip,
+  dirBytes,
+  noShipper,
+  type Shipper,
+  s3Store,
+  countSegments as shipCountSegments,
+  shipperFor,
+} from "./ship.ts";
 import { syntheticHook, syntheticRate } from "./synthetic.ts";
 import { busyMeter, macPower, powerOf } from "./system.ts";
 import { removeLaterWin, uninstall } from "./uninstall.ts";
+import {
+  apply,
+  appPath,
+  bootCheck,
+  currentVersion,
+  GOOD_AFTER_MS,
+  markGood,
+  nodeIn,
+  PUBLIC_KEY,
+  RELEASES,
+  RESTART_EXIT,
+  readState,
+  sourceAt,
+  stage,
+  stageInChild,
+  Updater,
+  verifyRelease,
+} from "./update.ts";
 
 const VERSION = (() => {
   try {
@@ -131,6 +158,38 @@ async function openRecorder(
   return recorder;
 }
 
+/**
+ * Start the app again: a launcher that restarts on RESTART_EXIT (the Windows .vbs loop, the
+ * systemd unit) sets AUTOTRACK_SUPERVISED; otherwise the new process is started from here.
+ */
+function relaunch(data: string, log: (msg: string) => void): never {
+  if (process.env.AUTOTRACK_SUPERVISED === "1") process.exit(RESTART_EXIT);
+  const app = appPath(data);
+  try {
+    spawn(nodeIn(app), [join(app, "dist", "cli.js"), "start"], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env: { ...process.env, AUTOTRACK_DIR: data },
+    }).unref();
+  } catch (e) {
+    log(`relaunch failed: ${(e as Error).message}`);
+  }
+  process.exit(0);
+}
+
+/** auto, or why updates are off here. */
+function updateMode(data: string, config: Config): "auto" | string {
+  if (process.platform === "darwin") return "off on Mac until the app is signed";
+  if (config.update === "off") return "off in config.json";
+  if (process.env.AUTOTRACK_UPDATE === "off") return "off (AUTOTRACK_UPDATE)";
+  if (!currentVersion(data)) return "off: this install has no versions folder; reinstall once";
+  return "auto";
+}
+
+const updateSource = () => sourceAt(process.env.AUTOTRACK_UPDATE_URL || RELEASES);
+const updateKey = () => process.env.AUTOTRACK_UPDATE_KEY || PUBLIC_KEY;
+
 async function start(data: string): Promise<number> {
   mkdirSync(data, { recursive: true });
   const held = lock(data);
@@ -139,12 +198,36 @@ async function start(data: string): Promise<number> {
     return 1;
   }
   const log = logger(data);
+  // Before anything that loads native code: a new version that keeps failing goes back here.
+  try {
+    if (bootCheck(data, VERSION) === "rolled back") {
+      log(`update: ${readState(data).error}`);
+      held.release();
+      relaunch(data, log);
+    }
+  } catch (e) {
+    log(`update: boot check: ${(e as Error).message}`);
+  }
   const config = loadConfig(data, log);
+  let lastShip: ShipStatus | null = null;
+  const shipper = shipperFor(data, config, log);
+  const tracked: Shipper = {
+    ship: async (dir) => {
+      const r = await shipper.ship(dir);
+      if (r.skipped !== "backoff" && r.skipped !== "busy")
+        lastShip = {
+          at: new Date().toISOString(),
+          ok: !r.failed && !r.skipped,
+          error: r.error ?? r.skipped ?? (r.failed ? `${r.failed} segment(s) left` : null),
+        };
+      return r;
+    },
+  };
   let recorder: Recorder;
   try {
     recorder = await openRecorder(data, config, {
       notify: true,
-      shipper: shipperFor(data, config, log),
+      shipper: tracked,
       log,
     });
     recorder.start();
@@ -157,17 +240,74 @@ async function start(data: string): Promise<number> {
       log("on Linux this usually means no X display (DISPLAY unset) or no RECORD extension");
     return 1;
   }
-  log(`recording ${recorder.journal.dir}`);
+  log(`recording ${recorder.journal.dir} (autotrack ${VERSION})`);
+  const startedAt = new Date().toISOString();
+  const mode = updateMode(data, config);
+  if (mode !== "auto") log(`update: ${mode}`);
+  const cli = join(PACKAGE_ROOT, "dist", "cli.js");
   let stopping: Promise<void> | null = null;
-  const stop = () => {
-    stopping ??= recorder.stop().finally(() => {
+  const finish = (then: () => void) => {
+    stopping ??= (async () => {
+      heart.stop();
+      updater.stop();
+      await recorder.stop().catch((e) => log(`stop: ${(e as Error).message}`));
       held.release();
       server.close();
+      then();
+    })();
+    return stopping;
+  };
+  const stop = () =>
+    finish(() => {
       log("stopped");
       process.exit(0);
     });
-    return stopping;
-  };
+  const updater = new Updater({
+    data,
+    version: VERSION,
+    mode: mode === "auto" ? "auto" : "off",
+    idleMs: () => recorder.idleMs(),
+    stageChild: () => stageInChild(existsSync(cli) ? cli : (process.argv[1] ?? cli)),
+    restart: async (why) => {
+      await heart.beat();
+      await finish(() => {
+        log(`restarting: ${why}`);
+        relaunch(data, log);
+      });
+    },
+    log,
+  });
+  const heart = new Heart({
+    store: config.ship
+      ? s3Store({ code: config.ship, ...(config.endpoint ? { endpoint: config.endpoint } : {}) })
+      : null,
+    device: config.ship?.device ?? config.device,
+    log,
+    body: (): Heartbeat => {
+      const st = recorder.status();
+      const sessions = sessionsDir(data);
+      const u = updater.status();
+      return {
+        v: 1,
+        version: VERSION,
+        platform: process.platform,
+        arch: arch(),
+        os: osVersion(),
+        at: new Date().toISOString(),
+        startedAt,
+        paused: st.paused,
+        level: st.level,
+        waiting: { segments: shipCountSegments(sessions).closed, bytes: dirBytes(sessions) },
+        ship: lastShip,
+        update: {
+          checkedAt: u.checkedAt,
+          latest: u.latest,
+          state: mode === "auto" ? u.state : mode,
+          error: u.error,
+        },
+      };
+    },
+  });
   const server = await serve(data, async (req: Request) => {
     if (req.op === "web") return recorder.external(req.event);
     const cmd = req.op;
@@ -178,8 +318,23 @@ async function start(data: string): Promise<number> {
       setImmediate(() => void stop());
       return { stopping: true };
     }
-    return recorder.statusNow();
+    if (cmd === "update") {
+      if (mode !== "auto") return { update: mode };
+      const r = await updater.check({ now: true });
+      return { update: r ?? { error: updater.status().error } };
+    }
+    return { ...(await recorder.statusNow()), version: VERSION, update: updater.status() };
   });
+  void heart.beat();
+  heart.start(BEAT_MS);
+  updater.start();
+  setTimeout(() => {
+    try {
+      markGood(data, VERSION);
+    } catch (e) {
+      log(`update: ${(e as Error).message}`);
+    }
+  }, GOOD_AFTER_MS).unref();
   server.ref();
   process.on("SIGINT", () => void stop());
   process.on("SIGTERM", () => void stop());
@@ -337,6 +492,12 @@ async function doctor(data: string): Promise<number> {
     const put = await checkShip(config, VERSION);
     line(put.ok, put.message);
   }
+  const mode = updateMode(data, config);
+  const us = readState(data);
+  line(
+    mode === "auto" ? !us.error : true,
+    `updates ${mode}${us.checkedAt ? `, checked ${us.checkedAt}, latest ${us.latest}` : ""}${us.error ? `; last error: ${us.error}` : ""}`,
+  );
   const helper = helperCommand();
   line(
     !!helper,
@@ -414,6 +575,97 @@ async function shipNow(data: string): Promise<number> {
   return r.failed || r.skipped ? 1 : 0;
 }
 
+/**
+ * What an update runs with the new version's own node before switching to it: the native input
+ * module loads, the helper answers, the config reads. Prints `selftest ok <version>`.
+ */
+async function selftest(data: string): Promise<number> {
+  const fail = (why: string) => {
+    console.error(`selftest failed: ${why}`);
+    return 1;
+  };
+  loadConfig(data);
+  try {
+    await import("uiohook-napi");
+  } catch (e) {
+    return fail(`uiohook-napi: ${(e as Error).message}`);
+  }
+  const helper = helperCommand(process.platform, PACKAGE_ROOT, "ocr");
+  if (!helper) return fail("helper missing");
+  const answer = await new Promise<string | null>((resolve) => {
+    const child = spawn(helper.cmd, helper.args, {
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    let out = "";
+    const done = (v: string | null) => {
+      clearTimeout(t);
+      child.kill();
+      resolve(v);
+    };
+    const t = setTimeout(() => done(null), 15_000);
+    child.on("error", () => done(null));
+    child.stdout.on("data", (c: Buffer) => {
+      out += c;
+      if (out.includes("\n")) done(out.split("\n")[0] ?? "");
+    });
+    child.stdin.write(`${JSON.stringify({ id: 1, op: "usage" })}\n`);
+  });
+  if (!answer) return fail("helper did not answer");
+  console.log(`selftest ok ${VERSION}`);
+  return 0;
+}
+
+/**
+ * `update`: check and apply now (through the running recorder when there is one). `--check`
+ * only reports. `--stage` is the recorder's child: download, unpack, selftest, one JSON line.
+ */
+async function updateCmd(data: string, args: string[]): Promise<number> {
+  const config = loadConfig(data);
+  const opts = { data, version: VERSION, source: updateSource(), key: updateKey() };
+  if (args.includes("--stage")) {
+    try {
+      console.log(JSON.stringify(await stage({ ...opts, log: (m) => console.error(m) })));
+      return 0;
+    } catch (e) {
+      console.log(JSON.stringify({ error: (e as Error).message }));
+      return 1;
+    }
+  }
+  if (args.includes("--check")) {
+    const r = verifyRelease(
+      await opts.source.read("release.json"),
+      Buffer.from(await opts.source.read("release.json.sig")).toString("utf8"),
+      opts.key,
+    );
+    const s = readState(data);
+    console.log(
+      `running ${VERSION}, latest ${r.version}${s.bad?.includes(r.version) ? " (marked bad)" : ""}`,
+    );
+    console.log(`updates: ${updateMode(data, config)}`);
+    if (s.error) console.log(`last error: ${s.error}`);
+    return 0;
+  }
+  const mode = updateMode(data, config);
+  if (mode !== "auto") {
+    console.error(`updates are ${mode}`);
+    return 1;
+  }
+  if (runningPid(data)) {
+    const r = (await send(data, "update")) as { update?: unknown } | null;
+    console.log(JSON.stringify(r?.update ?? r, null, 2));
+    return r ? 0 : 1;
+  }
+  const r = await stage({ ...opts, log: (m) => console.error(m) });
+  if (r.state !== "staged") {
+    console.log(`up to date (${VERSION}${r.latest ? `, latest ${r.latest}` : ""})`);
+    return 0;
+  }
+  apply(data, r.latest);
+  console.log(`updated to ${r.latest}; it runs from the next start`);
+  return 0;
+}
+
 async function uninstallCmd(data: string, args: string[]): Promise<number> {
   const log = (m: string) => console.log(m);
   return uninstall({
@@ -469,7 +721,8 @@ async function uninstallCmd(data: string, args: string[]): Promise<number> {
   });
 }
 
-const USAGE = "usage: autotrack start|stop|pause|resume|status|task|ship|doctor|uninstall";
+const USAGE =
+  "usage: autotrack start|stop|pause|resume|status|task|ship|doctor|update|selftest|uninstall";
 
 export async function main(argv: string[]): Promise<number> {
   const cmd = argv[0];
@@ -487,6 +740,10 @@ export async function main(argv: string[]): Promise<number> {
       return doctor(data);
     case "ship":
       return shipNow(data);
+    case "update":
+      return updateCmd(data, argv.slice(1));
+    case "selftest":
+      return selftest(data);
     case "uninstall":
       return uninstallCmd(data, argv.slice(1));
     default:

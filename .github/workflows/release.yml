@@ -123,6 +123,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: bundle-*
@@ -139,6 +140,11 @@ jobs:
           ls -la
           sha256sum autotrack-* > SHA256SUMS
           cat SHA256SUMS
+      # What the recorder's updater checks (src/update.ts). The key's public half is in update.ts.
+      - name: release.json
+        env:
+          AUTOTRACK_SIGNING_KEY: ${{ secrets.AUTOTRACK_SIGNING_KEY }}
+        run: node scripts/sign-release.mjs out "${GITHUB_REF_NAME#v}"
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

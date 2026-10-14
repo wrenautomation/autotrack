@@ -9,8 +9,8 @@
  * endpoint for tests; a reinstall without it drops any old one). The code never reaches argv,
  * logs or stdout.
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkEndpoint, dataDir, decodeCode } from "../dist/config.js";
 import { recorderPath } from "../host/control.mjs";
@@ -50,9 +50,16 @@ writeFileSync(`${path}.tmp`, `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 
 renameSync(`${path}.tmp`, path);
 console.log(`config ${path}`);
 
+// Windows and Linux: `<data>/app` links to `versions/<v>`, which an update replaces. Node resolves
+// links for this script and (on Linux) its own path, so the browser host goes through the link.
+let root = app;
+try {
+  if (lstatSync(join(data, "app")).isSymbolicLink()) root = join(data, "app");
+} catch {}
+const node = root === app ? process.execPath : join(root, "node", basename(process.execPath));
 const host = await installHost({
-  nodePath: process.execPath,
-  hostScript: join(app, "host", "autotrack-host.mjs"),
+  nodePath: node,
+  hostScript: join(root, "host", "autotrack-host.mjs"),
   // A custom data dir: the browser starts the host without our env, so pin the socket.
   ...(process.env.AUTOTRACK_DIR ? { control: recorderPath() } : {}),
 });

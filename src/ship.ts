@@ -38,6 +38,8 @@ export interface ShipResult {
   bytes?: number; // bytes put
   dropped?: number; // frames deleted locally to stay under maxLocalGb
   skipped?: "no code" | "backoff" | "busy";
+  /** Why the pass stopped short. */
+  error?: string;
 }
 
 export interface Shipper {
@@ -325,7 +327,7 @@ export class DirShipper implements Shipper {
       return dropped ? { ...r, dropped } : r;
     } catch (e) {
       this.o.log?.(`ship: ${(e as Error).message}`);
-      return { put: 0, failed: countSegments(sessions).closed };
+      return { put: 0, failed: countSegments(sessions).closed, error: (e as Error).message };
     } finally {
       release();
     }
@@ -370,6 +372,7 @@ export class DirShipper implements Shipper {
       const wait = Math.min(BACKOFF_MS * 2 ** (this.failures - 1), BACKOFF_MAX_MS);
       this.nextTry = this.now() + wait;
       result.failed = countSegments(sessions).closed;
+      result.error = (e as Error).message;
       this.o.log?.(
         `ship: ${(e as Error).message}; ${result.put} segment(s) shipped, ${result.failed} wait, next try in ${Math.round(wait / 60_000)} min`,
       );

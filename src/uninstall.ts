@@ -34,8 +34,8 @@ export interface UninstallDeps {
   hostUninstall(): Promise<void>;
   /** One last pass; null when there is no install code. */
   ship(): Promise<ShipResult | null>;
-  /** Windows: removes a dir after this process exits (its node.exe is inside). */
-  removeLater?(dir: string): void;
+  /** Windows: removes dirs, in order, after this process exits (its node.exe is inside). */
+  removeLater?(dirs: string[]): void;
   log(msg: string): void;
 }
 
@@ -116,10 +116,13 @@ export async function uninstall(d: UninstallDeps): Promise<number> {
   if (existsSync(d.data))
     for (const name of readdirSync(d.data)) {
       if (keep && name === "sessions") continue;
-      if (name === "app" && d.platform === "win32" && d.removeLater) continue; // node.exe is running
-      rmSync(join(d.data, name), { recursive: true, force: true });
+      // node.exe is running from versions\<v> (through the app junction)
+      if ((name === "app" || name === "versions") && d.platform === "win32" && d.removeLater)
+        continue;
+      rmSync(join(d.data, name), { recursive: true, force: true }); // a symlinked app: the link only
     }
-  if (d.platform === "win32" && d.removeLater) d.removeLater(keep ? app : d.data);
+  if (d.platform === "win32" && d.removeLater)
+    d.removeLater(keep ? [join(d.data, "versions"), app] : [d.data]);
   else if (!keep) rmSync(d.data, { recursive: true, force: true });
   d.log(
     keep
@@ -130,9 +133,11 @@ export async function uninstall(d: UninstallDeps): Promise<number> {
 }
 
 /** Windows: rmdir after a short wait, from a detached hidden cmd that outlives this process. */
-export function removeLaterWin(dir: string): void {
-  if (/["%\r\n]/.test(dir)) return;
-  const child = spawn("cmd.exe", ["/d", "/c", `ping -n 4 127.0.0.1 >nul & rmdir /s /q "${dir}"`], {
+export function removeLaterWin(dirs: string[]): void {
+  const ok = dirs.filter((d) => !/["%&|<>^\r\n]/.test(d));
+  if (!ok.length) return;
+  const rm = ok.map((d) => `rmdir /s /q "${d}"`).join(" & ");
+  const child = spawn("cmd.exe", ["/d", "/c", `ping -n 4 127.0.0.1 >nul & ${rm}`], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,

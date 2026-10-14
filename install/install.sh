@@ -120,6 +120,7 @@ else
   mkdir -p "$data"
   chmod 700 "$data"
   new="$data/app.new"
+  [ "$os" = Darwin ] || { mkdir -p "$data/versions" && new="$data/versions/new"; }
 fi
 rm -rf "$new"
 mkdir "$new"
@@ -145,10 +146,29 @@ while [ -f "$data/track.pid" ] && kill -0 "$(cat "$data/track.pid" 2>/dev/null |
   i=$((i + 1))
 done
 
-rm -rf "$data/app.old"
-[ -d "$app" ] && mv "$app" "$data/app.old"
-mv "$new" "$app"
-rm -rf "$data/app.old"
+if [ "$os" = Darwin ]; then
+  # Mac keeps a real app folder: its permissions are tied to the node binary, so no self-update yet.
+  rm -rf "$data/app.old"
+  [ -d "$app" ] && mv "$app" "$data/app.old"
+  mv "$new" "$app"
+  rm -rf "$data/app.old"
+else
+  # Linux self-updates (src/update.ts): versions/<v>, and app a symlink to the current one. An
+  # install before 0.3.0 left a real app folder: it goes.
+  version=$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' "$new/package.json" | head -n 1)
+  case "$version" in [0-9]*.[0-9]*.[0-9]*) ;; *) die "bad version in the bundle: $version" ;; esac
+  mkdir -p "$data/versions"
+  rm -rf "$data/versions/$version"
+  mv "$new" "$data/versions/$version"
+  if [ -d "$app" ] && [ ! -L "$app" ]; then rm -rf "$app"; fi
+  ln -sfn "versions/$version" "$data/app.next"
+  mv -T "$data/app.next" "$app"
+  # A fresh install starts clean: no pending rollback, other versions gone.
+  rm -f "$data/update.json"
+  for d in "$data/versions"/*; do
+    [ "$d" = "$data/versions/$version" ] || rm -rf "$d"
+  done
+fi
 node="$app/node/node"
 cli="$app/bin/autotrack"
 say "Installed $(cat "$app/VERSION") in $app"
@@ -227,7 +247,8 @@ linux_autostart() {
       printf '[Service]\n'
       printf 'ExecStart=%s %s start\n' "$(sd_quote "$node")" "$(sd_quote "$app/dist/cli.js")"
       [ -n "${AUTOTRACK_DIR:-}" ] && printf 'Environment=%s\n' "$(sd_quote "AUTOTRACK_DIR=$data")"
-      printf 'Restart=on-failure\nRestartSec=30\n\n'
+      # Exit 75 is an update or a rollback; anything but 0 restarts.
+      printf 'Environment=AUTOTRACK_SUPERVISED=1\nRestart=on-failure\nRestartSec=10\n\n'
       printf '[Install]\nWantedBy=graphical-session.target\n'
     } >"$unit"
     systemctl --user daemon-reload

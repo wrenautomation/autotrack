@@ -47,7 +47,14 @@ $env:AUTOTRACK='<code>'; irm https://raw.githubusercontent.com/wrenautomation/au
 You don't need admin rights or Node either way. The one-liner downloads the latest release and the
 installers carry it. Both verify its SHA-256 and set autotrack to start at login. On a Mac they
 then open System Settings so you can allow Accessibility, Input Monitoring and Screen Recording
-for `node`, and wait until you have. To update, run the same command or installer again.
+for `node`, and wait until you have.
+
+Windows and Linux update themselves. About every 6 hours autotrack checks the latest release. It
+installs a new version only if the release is signed and every checksum matches, and only after
+the new version passes a self-test. It switches over when you've stopped typing for 2 minutes. If
+the new version fails to start 3 times, autotrack goes back to the old one and skips that version.
+Set `"update": "off"` in `config.json` to stop updates. On a Mac, run the same command or installer
+again to update. Mac updates itself once the app is signed.
 
 On Linux it starts at login through a systemd user service, or an XDG autostart entry when there's
 no systemd session. Use an Xorg session. On Wayland it sees only some apps and part of the input,
@@ -67,6 +74,7 @@ update, press its reload button. The extension isn't on the Chrome Web Store yet
 - `autotrack pause` and `autotrack resume`.
 - `autotrack doctor`: checks setup, permissions, a test upload, CPU and memory.
 - `autotrack ship`: uploads now instead of waiting.
+- `autotrack update`: updates now (Windows and Linux). `--check` only says what's latest.
 - `autotrack uninstall`: removes the login item, the browser hookup and the app. If some
   recordings haven't been uploaded yet, it asks before deleting them. `--yes` skips the question.
 

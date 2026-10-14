@@ -72,6 +72,8 @@ export interface Config {
   ship?: TrackCode;
   /** S3-compatible endpoint instead of AWS (path-style); https, or http on localhost (tests). */
   endpoint?: string;
+  /** Self-update: `auto` (default) or `off`. */
+  update: "auto" | "off";
 }
 
 /** An endpoint config.json may name, or null. */
@@ -128,7 +130,7 @@ export function hostDevice(name = hostname()): string {
 }
 
 /**
- * config.json: `{ code?, device?, excludeApps?, excludeTitles?, maxLocalGb?, endpoint? }`. `code` is the
+ * config.json: `{ code?, device?, excludeApps?, excludeTitles?, maxLocalGb?, endpoint?, update? }`. `code` is the
  * install code as given (base64url) or already decoded. A bad code is reported, not fatal:
  * recording goes on, shipping waits.
  */
@@ -156,6 +158,7 @@ export function parseConfig(raw: unknown, warn: (msg: string) => void = () => {}
     excludeApps: strings(o.excludeApps),
     excludeTitles: strings(o.excludeTitles).filter(validRegex),
     maxLocalGb: typeof o.maxLocalGb === "number" && o.maxLocalGb > 0 ? o.maxLocalGb : 5,
+    update: o.update === "off" ? "off" : "auto",
   };
   if (ship) cfg.ship = ship;
   if (o.endpoint !== undefined) {

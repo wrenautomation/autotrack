@@ -422,6 +422,11 @@ export class Recorder {
     };
   }
 
+  /** ms since the last raw input (Infinity before the first). */
+  idleMs(): number {
+    return this.clock.now() - this.lastRaw;
+  }
+
   /** `status` with the helpers' usage read now (for `doctor`'s measurement). */
   async statusNow(): Promise<Status> {
     this.helpers = (await this.d.helperUsage?.().catch(() => ({}))) ?? {};
