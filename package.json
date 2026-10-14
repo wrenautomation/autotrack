@@ -1,6 +1,6 @@
 {
   "name": "@wrenautomation/autotrack",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Records every input and the screen around it on Mac and Windows, for computer-use training data.",
   "private": true,
   "type": "module",

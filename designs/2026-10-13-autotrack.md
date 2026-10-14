@@ -23,7 +23,7 @@ nothing from autobrowse; autobrowse keeps a hand-synced copy of the session type
 | hook | `src/hook.ts` | `uiohook-napi` (Mac, Windows): raw mouse and key events |
 | events | `src/events.ts` | raw → `Event`: throttle moves, pair down/up into click/drag, fold keys into text runs and hotkeys |
 | screen | `src/screen.ts`, `src/capture.ts` | the display under the cursor, a 2 fps ring of the latest grab, "after" frame 300 ms after an act. Grabs live in the shots helper; Node holds slot numbers and hashes |
-| probe | `src/probe.ts` + `helpers/` | app, window, element at a point, focused element is a password: Swift helper on Mac, PowerShell UIA helper on Windows, one JSON-lines protocol |
+| probe | `src/probe.ts` + `helpers/` | app, window, element at a point, focused element is a password: Swift helper on Mac, one C# exe (UI Automation) on Windows, one JSON-lines protocol |
 | privacy | `src/privacy.ts` | password fields, excluded apps, secret-shaped text, pause |
 | journal | `src/journal.ts` | session dir, 5-minute segments, `events.jsonl` + `frames/`, closed segment → `.done` |
 | ship | `src/ship.ts` | closed segments → S3 under the device's prefix, delete after put, local cap |
@@ -127,8 +127,9 @@ The helper is a long-lived child; one JSON request per line on stdin, one respon
 
 Mac: `helpers/mac/probe.swift`, built by `swiftc -O` into a universal binary in CI and
 shipped in the Mac bundle (and built on first run if missing and `swiftc` exists). Windows:
-`helpers/win/probe.ps1`, Windows PowerShell 5.1 (on every Windows), `UIAutomationClient` +
-P/Invoke for the foreground window. Each answer under 50 ms p95; a timeout gives `null`, never a
+`helpers/win/autotrack-helper.exe --probe`, C# built in CI by the csc of .NET Framework 4.8 (on
+every Windows 10 and 11, so nothing to install), managed `UIAutomationClient` + P/Invoke for the
+foreground window. `--shots` and `--ocr` are the same exe. Each answer under 50 ms p95; a timeout gives `null`, never a
 stall in the hook. A click's `at` is the exception: it is asked at the click with 3 s to answer
 (only that act's write waits on it; the Windows helper can take over 1 s, and a later first ask
 could see the screen after the click).
@@ -149,8 +150,7 @@ Signal adds (see Signal below):
 ← {"event":"clipboard","types":[…],"length":13,"text":"…"?,"concealed":false,"secure":false}
 ```
 
-- `tree` walks on the helper's own worker (Mac a serial queue, Windows a background thread in the
-  embedded C#), so `at`/`front` keep answering while it runs; its answer comes when done (the
+- `tree` walks on the helper's own worker (Mac a serial queue, Windows a pool thread), so `at`/`front` keep answering while it runs; its answer comes when done (the
   client waits 3 s). One walk at a time.
 - Clipboard is polled in the helper, never in Node, and pushed: a line with `event` and no `id`.
   Mac checks `NSPasteboard.changeCount` every 250 ms; Windows `GetClipboardSequenceNumber` every
@@ -159,7 +159,7 @@ Signal adds (see Signal below):
 
 ## Shots protocol
 
-A second long-lived helper, the same binary or script started with `--shots`, so a capture never
+A second long-lived helper, the same binary started with `--shots`, so a capture never
 delays a probe answer. Node keeps slot numbers and hashes, never pixels.
 
 ```
@@ -184,7 +184,7 @@ delays a probe answer. Node keeps slot numbers and hashes, never pixels.
   and ~55 MB RSS a grab); `CGDisplayCreateImage` below that or when SCK fails (~40 ms CPU, 210-350 MB
   RSS, which is why it is the fallback, not the default). CoreGraphics draw for the downscale, ImageIO
   for the encode. Windows: `BitBlt`/`StretchBlt` (HALFTONE, CAPTUREBLT) from the screen DC under
-  per-monitor DPI v2, GDI+ JPEG encoder, all in one embedded C# block.
+  per-monitor DPI v2, GDI+ JPEG encoder.
 - A missing or failing shots helper means no frames; the recorder carries on and `doctor` says so.
 
 ## Storage
@@ -423,17 +423,17 @@ budget, and stops at the first input.
 
 ### Level governor (recorder)
 
-Every 10 s the recorder picks a level and writes `{kind:"level", level, why}` when it changes, so
+Every 2 s the recorder picks a level and writes `{kind:"level", level, why}` when it changes, so
 every act says what quality it was captured at.
 
 | | `full` | `normal` | `lean` |
 |---|---|---|---|
-| When | on AC, system calm | default; battery ≥ 20% | battery < 20%, system busy, or own CPU over budget for 60 s |
+| When | on AC, system calm | default; battery ≥ 20%; one level down for a 10 s burst over budget | battery < 20%, system busy, own CPU over budget for 60 s, or a 10 s burst over twice the budget |
 | Ring (before frame) | 250 ms | 500 ms | 1 s |
 | After frame | settle, 100 ms ticks | settle, 150 ms ticks | fixed 300 ms |
 | Crops | yes | yes | no |
 | Idle frames | 1 s | 2 s | 5 s |
-| Trees | focus + screen change | focus + screen change | focus only |
+| Trees | focus + screen change, ≤ 1/s | focus + screen change, ≤ 1 per 2 s | focus only, ≤ 1 per 5 s |
 
 - Inputs: own CPU (recorder + helpers, 60 s window), power (Mac `pmset -g batt`, Windows
   `GetSystemPowerStatus`, polled every 60 s), system busy (Mac load average / cores > 0.85,
@@ -531,8 +531,8 @@ Where the build is more exact than the bullets above. Field names are unchanged.
   `.done` counts as skipped. Line boxes are whole pixels, origin top-left. `conf` (0 to 1, three
   decimals) is Mac only: Windows.Media.Ocr has none, and its box is the union of the line's words.
 - OCR helper: op `{"op":"read","path"}` → `{lines, w, h, cpuMs}`. Mac: Vision `.accurate` with
-  language correction, at QoS background. Windows: `Windows.Media.Ocr` through WinRT `AsTask`
-  from PowerShell 5.1, BelowNormal priority. It uses the user's profile languages, then en-US,
+  language correction, at QoS background. Windows: `Windows.Media.Ocr` in the helper exe
+  (`--ocr`), waited on through each WinRT call's `Completed` handler, at BelowNormal priority. It uses the user's profile languages, then en-US,
   and errors when no OCR language is installed (the CI helper test adds
   `Language.OCR~~~en-US~0.0.1.0`). Each run is a new helper, closed synchronously on the first
   input (well under 100 ms), with the image requeued. Unknown power counts as AC.
@@ -553,8 +553,37 @@ Where the build is more exact than the bullets above. Field names are unchanged.
   idle. The 10 s input window is a burst, not the average, but it is over budget on Windows.
 - GitHub's macOS VMs run at a load of 2 to 3 per core, so the Mac e2e pins `full`; unpinned they
   hold `lean`. The Windows e2e runs unpinned and picks `normal` (no load average there).
-- The Windows helpers are PowerShell 5.1 processes of about 105 MB each after startup. Every 30 s
-  each one collects and trims its working set, which brings them to about 20 MB until used.
+- The Windows helpers were PowerShell 5.1 processes of about 105 MB each after startup. They are
+  now one C# exe, below.
+
+### Windows budget (2026-10-14)
+
+The first Windows e2e ran 8.9% CPU and 270 MB with input. The fixes:
+
+- One exe, `helpers/win/autotrack-helper.exe --probe|--shots|--ocr`, C# 5 built by
+  `helpers/win/build.ps1` with the in-box csc of .NET Framework 4.8. CI builds it; the
+  win32-x64 bundle ships only the exe. `probe.ps1` is deleted, so there is one path. The protocol
+  is unchanged.
+- Focus is event-driven. A WinEvent hook thread (`EVENT_SYSTEM_FOREGROUND`,
+  `EVENT_OBJECT_FOCUS`, out of context) bumps a counter. `focused` answers from cache while the
+  counter and the focused hwnd are unchanged and the answer is under 2 s old. A null is never
+  cached. The short age and the hwnd check keep a stale `secure` flag from slipping through.
+- UIA reads go through one `CacheRequest`, so an element is one cross-process call, not one per
+  property. The front window's dialog check is cached per hwnd for 3 s.
+- Clicks, drags and scrolls each ask for the element at the point. The rest ask (pointer still
+  for 100 ms) runs at most once a second. Trees run at most once per level's `treeMs` (1, 2, 5 s).
+- Each helper trims its working set once it has had no request but `usage` for 5 s.
+- Governor: ticks every 2 s. A second meter covers 10 s. A burst over 3% steps down one level
+  (`full` → `normal` → `lean`), over 6% goes to `lean`, and the step holds until the burst is
+  under 2%. `why` reads `burst: own cpu X% over 10 s`. Status adds `burstPct` and `inputs`.
+- `doctor` reads status every 2 s over its 10 s and prints the peak RSS and whether input came
+  in (`active, N inputs` or `idle`). The Windows e2e fails past 6% CPU or 200 MB peak RSS with
+  input. The Mac e2e reports the same numbers without failing (its runner is loaded 2 to 3 per
+  core). The real-use target stays 3% on average.
+- Helper tests check idle RSS ≤ 30 MB for the probe, and ≤ 30 MB plus the ring for shots (the
+  ring is 4 frames of w×h×4 bytes, ~33 MB at 1080p).
+- Mac: the 4.2% burst at `full` was recorder 1.7%, probe 0.6%, shots 1.9%, so per-key AX reads
+  are not the cause. A text act asks `focused` once, not per key. The burst rule covers it.
 
 ## Installers (2026-10-13, William)
 
@@ -663,3 +692,11 @@ Known limits:
   no upload of full-resolution pixels, so it runs in idle time instead.
 - Levels over fixed rates: a laptop on battery or a busy machine keeps recording at lower quality
   rather than slowing the person down, and every act records the level it got.
+- One compiled C# exe on Windows over PowerShell helpers (2026-10-14): PowerShell 5.1 costs about
+  105 MB per process and compiles its embedded C# on every start. The csc in .NET Framework 4.8
+  ships with every Windows 10 and 11, so the exe needs nothing installed and CI builds it without
+  an SDK. WinEvent hooks over UIA `FocusChanged`, because they need no UIA event pump in the helper. The
+  hook only marks the cache stale; the read is still a UIA read.
+- A 10 s burst rule in the governor (2026-10-14): the 60 s window turned lean a minute after the
+  burst ended. Stepping down one level keeps crops at `normal`; only a burst past twice the
+  budget drops them.
