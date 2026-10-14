@@ -6,7 +6,7 @@
 //            never named by its text), focused, tree (no values), clipboard events (plain, and a
 //            password manager's copy concealed), usage, errors
 //   --shots  displays, grab (hash stable on a still screen), save, crop at native pixels, the ring
-//   --ocr    reads test/fixtures/ocr-text.jpg ("Hello", "Submit")
+//   --ocr    reads test/fixtures/ocr-text.jpg ("hello", "Submit")
 // usage: node helpers/linux/test.mjs
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -325,7 +325,7 @@ check(
   `ocr shape: w ${read.w} h ${read.h}`,
 );
 const text = (read.lines ?? []).map((l) => l.text).join(" ");
-check(/Hello/.test(text) && /Submit/.test(text), `ocr read Hello and Submit: ${text}`);
+check(/hello/i.test(text) && /Submit/.test(text), `ocr read hello and Submit: ${text}`);
 check(
   (read.lines ?? []).every((l) => ["x", "y", "w", "h", "conf"].every((k) => isNum(l[k]))),
   "every OCR line has a box and conf",

@@ -60,7 +60,8 @@ def form(out):
     win = Gtk.Window(title="autotrack e2e form")
     win.set_default_size(420, 160)
     screen = Gdk.Screen.get_default()
-    win.move(screen.get_width() - 480, screen.get_height() - 260)
+    geo = Gdk.Display.get_default().get_monitor(0).get_geometry()
+    win.move(geo.x + geo.width - 480, geo.y + geo.height - 260)
     win.set_keep_above(True)
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
     box.set_border_width(20)
@@ -103,9 +104,16 @@ def concealed(text):
 
     # PyGObject has no set_with_data; a hidden widget owning the selection does the same.
     w = Gtk.Invisible()
-    w.selection_add_targets(Gdk.SELECTION_CLIPBOARD, targets)
+    # gtk_selection_add_targets is a Gtk function in some PyGObject versions, a method in others.
+    add = getattr(w, "selection_add_targets", None)
+    if add:
+        add(Gdk.SELECTION_CLIPBOARD, targets)
+    else:
+        Gtk.selection_add_targets(w, Gdk.SELECTION_CLIPBOARD, targets)
     w.connect("selection-get", lambda _w, sel, info, _t: get(sel, info))
-    Gtk.selection_owner_set(w, Gdk.SELECTION_CLIPBOARD, Gdk.CURRENT_TIME)
+    if not Gtk.selection_owner_set(w, Gdk.SELECTION_CLIPBOARD, Gdk.CURRENT_TIME):
+        sys.exit("could not own CLIPBOARD")
+    print("concealed copy owns CLIPBOARD", flush=True)
     GLib.timeout_add_seconds(20, Gtk.main_quit)
     Gtk.main()
 
