@@ -57,7 +57,7 @@ describe("clicks and drags", () => {
     const { push, strip, begins, out } = fold();
     push(down(100, 10, 20), up(180, 11, 21));
     expect(strip()).toEqual([{ kind: "click", t: 100, x: 10, y: 20, button: "left", count: 1 }]);
-    expect(begins).toEqual([{ on: "point", x: 10, y: 20 }]);
+    expect(begins).toEqual([{ on: "point", x: 10, y: 20, press: true }]);
     expect(out[0]?.end).toBe(180);
   });
 

@@ -2,7 +2,9 @@
  * The recorder: hook → folder → context (probe, frames) → privacy → journal, plus the timers
  * (fold ticks, frame ring, front-app poll, idle frames, segment close, ship) and pause state.
  * Signal rides along: each act's outcome (`out`) and latest tree, accessibility trees on focus
- * and after a screen change, dialogs, clipboard changes, and the task marker's prompt.
+ * and after a screen change, dialogs, clipboard changes, and the task marker's prompt. Quality:
+ * the level governor (every 10 s), a fresh before-frame at button-down, after-frames on settle,
+ * the cursor approach path, native crops, `shot` events, segment stats and idle-time OCR.
  * Every dependency comes in, so tests drive it with fakes and a hand-run clock.
  */
 
@@ -15,13 +17,18 @@ import {
   type Event,
   type Folded,
   Folder,
+  type Level,
   type Out,
   type PauseReason,
   type Raw,
   type SessionMeta,
   type WindowInfo,
 } from "./events.ts";
-import { Journal } from "./journal.ts";
+import type { Usage } from "./helper.ts";
+import { Journal, type Reservation } from "./journal.ts";
+import { type Busy, type Decision, Governor, LEVEL_TICK_MS, LEVELS, type Power } from "./level.ts";
+import { OCR_TICK_MS, type OcrReader, OcrScheduler } from "./ocr.ts";
+import { type PathPoint, PathRing } from "./path.ts";
 import {
   clipboardText,
   type Gate,
@@ -40,13 +47,17 @@ import type {
   PermAnswer,
   TreeAnswer,
 } from "./probe.ts";
-import { type Capturer, differs, type Frame, Screen } from "./screen.ts";
+import { type Capturer, type CropAnswer, differs, type Frame, Screen } from "./screen.ts";
 import type { Shipper } from "./ship.ts";
 
 export const FOLD_TICK_MS = 100;
-export const RING_TICK_MS = 500;
+/** The ring's tick; each level sets how often a tick grabs. */
+export const RING_TICK_MS = 250;
 export const FRONT_POLL_MS = 1000;
-export const IDLE_TICK_MS = 2000;
+/** The idle tick; each level sets how often a tick grabs. */
+export const IDLE_TICK_MS = 1000;
+/** Crops: this many points square around the pointer. */
+export const CROP_PT = 256;
 export const SEGMENT_TICK_MS = 30_000;
 export const SHIP_MS = 5 * 60_000;
 /**
@@ -108,10 +119,30 @@ export interface RecorderDeps {
   timers?: boolean;
   sleep?: (ms: number) => Promise<void>;
   log?: (msg: string) => void;
+  /** The governor's readings; without them the level stays `normal` (or `pinned`). */
+  power?: () => Promise<Power | null>;
+  busy?: () => Busy | null;
+  /** The helpers' own cost, by helper (`probe`, `shots`). */
+  helperUsage?: () => Promise<Record<string, Usage | null>>;
+  /** How many times each helper has been started. */
+  helperStarts?: () => Record<string, number>;
+  /** `AUTOTRACK_LEVEL`: hold this level. */
+  pinned?: Level | null;
+  /** Start an OCR helper run; none: no OCR (segments get `.done` at close). */
+  ocr?: (() => OcrReader) | null;
+}
+
+interface Crop {
+  slot: Reservation;
+  answer: Promise<CropAnswer | null>;
 }
 
 interface Ctx {
   before: Promise<Frame | null>;
+  /** The approach: raw moves in the last 1 s before the act. */
+  path?: PathPoint[];
+  /** The crop asked for at the act's start (its file is held until the act is known safe). */
+  crop?: Crop | null;
   front: Promise<FrontAnswer | null>;
   target: Promise<AtAnswer | FocusedAnswer | null>;
   /** The latest tree written when the act began. */
@@ -134,6 +165,13 @@ export interface Status {
   uptimeS: number;
   cpuUs: number; // process user + system CPU since start, µs
   rssMb: number;
+  level: Level;
+  why: string;
+  /** Own CPU (recorder + helpers, no OCR), % of one core over 60 s; null in the first minute. */
+  cpuPct: number | null;
+  /** Each helper's cumulative CPU ms and resident MB at the last level tick. */
+  helpers: Record<string, Usage | null>;
+  ocr: { on: boolean; waiting: number; running: boolean; cpuMs: number };
 }
 
 /** Within 2 px: the same resting point. */
@@ -178,6 +216,7 @@ export function outOf(
 }
 
 const clip = (s: string, n: number) => redactSecrets(s).text.slice(0, n);
+const r1 = (v: number) => Math.round(v * 10) / 10;
 
 export class Recorder {
   readonly journal: Journal;
@@ -209,6 +248,13 @@ export class Recorder {
   private timers: NodeJS.Timeout[] = [];
   private shipping = false;
   private stopped = false;
+  private readonly path = new PathRing();
+  /** Crops whose act has not reached `prepare` (a held button a pause drops never will). */
+  private openCrops = new Set<Crop>();
+  private dropped = 0;
+  private helpers: Record<string, Usage | null> = {};
+  readonly governor: Governor;
+  readonly ocr: OcrScheduler | null;
 
   private readonly d: RecorderDeps;
 
@@ -219,10 +265,36 @@ export class Recorder {
     this.gate = makeGate(d.config);
     this.t0 = this.clock.now();
     this.epoch0 = this.clock.epoch();
+    this.governor = new Governor({
+      now: () => this.clock.now(),
+      cpu: async () => {
+        const u = process.cpuUsage();
+        const out: Record<string, number | null> = { recorder: (u.user + u.system) / 1000 };
+        this.helpers = (await d.helperUsage?.().catch(() => ({}))) ?? {};
+        for (const [k, v] of Object.entries(this.helpers)) out[k] = v?.cpuMs ?? null;
+        return out;
+      },
+      power: d.power ?? (async () => null),
+      busy: d.busy ?? (() => null),
+      ...(d.pinned ? { pinned: d.pinned } : {}),
+    });
+    this.ocr = d.ocr
+      ? new OcrScheduler({
+          now: () => this.clock.epoch(),
+          idleFor: () => this.clock.now() - this.lastRaw,
+          power: () => this.governor.powerNow,
+          level: () => this.governor.level,
+          start: d.ocr,
+          finish: (sd) => this.journal.finish(sd),
+          ...(d.log ? { log: d.log } : {}),
+        })
+      : null;
     this.journal = new Journal({
       sessions: d.sessions,
       meta: { ...d.meta, device: d.config.device, displays: safe(() => d.capturer.displays(), []) },
       now: () => this.clock.epoch(),
+      waitOcr: this.ocr !== null,
+      onClosed: (sd) => this.ocr?.closed(sd),
     });
     this.screen = new Screen({
       capturer: d.capturer,
@@ -230,6 +302,8 @@ export class Recorder {
       now: () => this.clock.now(),
       blocked: () => this.paused !== null,
       mayWrite: async () => gateOf(this.gate, ...frontParts(await this.front())) === null,
+      params: () => LEVELS[this.governor.level],
+      onShot: (n, f, path) => this.onShot(n, f, path),
       ...(d.log ? { log: d.log } : {}),
     });
     this.folder = new Folder<Ctx>(
@@ -243,6 +317,8 @@ export class Recorder {
   }
 
   start(): void {
+    this.ocr?.resume(this.d.sessions);
+    void this.levelTick().catch((e) => this.d.log?.(`level: ${(e as Error).message}`));
     this.stopHook = this.d.hook((r) => this.onRaw(r));
     this.d.probe.watchClipboard?.((c) => this.onClipboard(c));
     if (this.d.timers !== false) {
@@ -258,11 +334,13 @@ export class Recorder {
         this.timers.push(h);
       };
       every(FOLD_TICK_MS, () => this.foldTick());
-      every(RING_TICK_MS, () => this.screen.ringTick());
+      every(RING_TICK_MS, () => this.ringTick());
       every(FRONT_POLL_MS, () => this.frontTick());
       every(IDLE_TICK_MS, () => this.idleTick());
       every(SEGMENT_TICK_MS, () => this.journal.tick());
       every(SHIP_MS, () => this.shipTick());
+      every(LEVEL_TICK_MS, () => this.levelTick());
+      if (this.ocr) every(OCR_TICK_MS, () => this.ocr?.tick());
     }
     this.d.notify?.("Tracking on");
   }
@@ -272,17 +350,19 @@ export class Recorder {
     this.stopped = true;
     for (const h of this.timers) clearInterval(h);
     this.stopHook?.();
-    this.folder.flush();
+    this.flush();
     this.release(Number.POSITIVE_INFINITY);
     await this.settled();
     this.journal.close();
+    this.ocr?.close();
     this.d.probe.close();
     this.d.capturer.close?.();
   }
 
   pause(reason: "hotkey" | "cli"): void {
     if (this.userPaused) return;
-    this.folder.flush();
+    this.flush();
+    this.path.clear();
     this.userPaused = reason;
     this.sync();
     this.d.notify?.("Tracking paused");
@@ -311,7 +391,60 @@ export class Recorder {
       uptimeS: Math.round((this.clock.now() - this.t0) / 1000),
       cpuUs: cpu.user + cpu.system,
       rssMb: Math.round(process.memoryUsage().rss / 1e6),
+      level: this.governor.level,
+      why: this.governor.decision?.why ?? "",
+      cpuPct: this.governor.cpuPct === null ? null : Math.round(this.governor.cpuPct * 100) / 100,
+      helpers: this.helpers,
+      ocr: {
+        on: this.ocr !== null,
+        waiting: this.ocr?.waiting ?? 0,
+        running: this.ocr?.busy ?? false,
+        cpuMs: Math.round(this.ocr?.cpuMs ?? 0),
+      },
     };
+  }
+
+  /** `status` with the helpers' usage read now (for `doctor`'s measurement). */
+  async statusNow(): Promise<Status> {
+    this.helpers = (await this.d.helperUsage?.().catch(() => ({}))) ?? {};
+    return this.status();
+  }
+
+  /**
+   * Every 10 s: the governor's reading; a `level` event when the level changed (the first tick
+   * always writes one). Helper restarts go into the segment's stats.
+   */
+  async levelTick(): Promise<Decision | null> {
+    if (this.stopped) return null;
+    const d = await this.governor.tick();
+    const starts = this.d.helperStarts?.();
+    if (starts) this.journal.stats.helperStarts(starts);
+    if (!d || this.stopped) return d;
+    this.journal.stats.setLevel(d.level);
+    const t = this.t(this.clock.now());
+    this.side(t, () =>
+      this.enqueue(async () =>
+        this.write({ kind: "level", level: d.level, why: d.why, t, ts: this.ts(t) }),
+      ),
+    );
+    return d;
+  }
+
+  /** A frame was written: its `shot` event, and it joins the OCR queue. */
+  private onShot(n: number, f: Frame, path: string): void {
+    const t = this.t(this.clock.now());
+    const e: Event = {
+      kind: "shot",
+      frame: n,
+      at: this.t(f.at),
+      x: r1(f.x),
+      y: r1(f.y),
+      display: f.shot.display,
+      t,
+      ts: this.ts(t),
+    };
+    this.side(t, () => this.enqueue(async () => this.write(e)));
+    this.ocr?.image(path, f.shot.hash);
   }
 
   /**
@@ -354,6 +487,7 @@ export class Recorder {
 
   onRaw(r: Raw): void {
     if (this.stopped) return;
+    this.ocr?.input(); // any input stops OCR at once, paused or not
     if (hotkey(r, "p")) {
       if (this.userPaused) this.resume();
       else this.pause("hotkey");
@@ -369,7 +503,13 @@ export class Recorder {
     this.screen.input(...(r.type === "keydown" ? [] : ([r.x, r.y] as const)));
     if (r.type === "move" && !(this.rest && near(this.rest, r)))
       this.rest = { x: r.x, y: r.y, t: this.clock.now() };
-    this.folder.push({ ...r, t: this.t(r.t) } as Raw);
+    const t = this.t(r.t);
+    if (r.type === "move") this.path.move(t, r.x, r.y);
+    this.folder.push({ ...r, t } as Raw);
+    if (this.folder.movesDropped !== this.dropped) {
+      this.journal.stats.s.movesDropped += this.folder.movesDropped - this.dropped;
+      this.dropped = this.folder.movesDropped;
+    }
     if (r.type === "down") this.rest = null; // the click may change what is there
   }
 
@@ -404,6 +544,11 @@ export class Recorder {
         if (front) this.applyFront(front, t);
       }),
     );
+  }
+
+  /** The frame ring: a grab while someone is active, at the level's period. */
+  ringTick(): Promise<void> {
+    return this.screen.ringTick();
   }
 
   async idleTick(): Promise<void> {
@@ -477,11 +622,16 @@ export class Recorder {
     return this.d.frontFallback ? safe(this.d.frontFallback, null) : a;
   }
 
-  private begin(b: Begin, _t: number): Ctx {
+  private begin(b: Begin, t: number): Ctx {
     const c = this.coords();
     let target: Promise<AtAnswer | FocusedAnswer | null>;
     let at: { x: number; y: number } | undefined;
+    let path: PathPoint[] | undefined;
+    let crop: Crop | null = null;
     if (b.on === "point") {
+      path = this.path.before(t);
+      if (b.press) this.path.press();
+      crop = this.cropAt(b.x, b.y);
       at = c.toPhysical(b.x, b.y);
       target = this.d.probe.at(at.x, at.y, AT_MS);
       const rested = this.rest?.answer && near(this.rest, b) ? this.rest.answer : null;
@@ -493,16 +643,49 @@ export class Recorder {
         });
     } else target = this.d.probe.focused();
     return {
-      before: this.screen.before(),
+      // a click's before is the screen at button-down; a key's effect starts at key-down
+      before: b.on === "point" && b.press ? this.screen.fresh() : this.screen.before(),
       front: this.front(),
       target,
       ...(at ? { at } : {}),
+      ...(path?.length ? { path } : {}),
+      crop,
       tree: this.lastTree,
     };
   }
 
+  /** A native crop at the act's start, held until `prepare` knows it may keep it. */
+  private cropAt(x: number, y: number): Crop | null {
+    const cap = this.d.capturer;
+    if (!cap.crop || this.paused || !LEVELS[this.governor.level].crops) return null;
+    let slot: Reservation;
+    try {
+      slot = this.journal.reserveCrop();
+    } catch {
+      return null;
+    }
+    const answer = cap.crop(x, y, CROP_PT, slot.path).then(
+      (a) => (a?.ok ? a : null),
+      () => null,
+    );
+    const crop = { slot, answer };
+    this.openCrops.add(crop);
+    return crop;
+  }
+
+  /** Close every open act; a button still held is dropped, and so is its crop. */
+  private flush(): void {
+    this.folder.flush();
+    for (const c of this.openCrops) void c.answer.then(() => c.slot.done(false));
+    this.openCrops.clear();
+  }
+
   private onAct(a: Folded<Ctx>): void {
     this.release(a.t);
+    if ((a.kind === "click" || a.kind === "drag") && a.ctx) {
+      const held = this.path.release(a.t);
+      if (a.kind === "drag" && held.length) a.ctx.path = [...(a.ctx.path ?? []), ...held];
+    }
     if (a.kind === "move") {
       const { end: _e, ctx: _c, ...move } = a;
       const display = this.d.displayAt?.(a.x, a.y);
@@ -517,7 +700,8 @@ export class Recorder {
       if (p.front) this.applyFront(p.front, a.t);
       if (!p.event) return;
       this.write(p.event);
-      if ((p.event as { out?: Out }).out?.screen) this.wantTree();
+      if ((p.event as { out?: Out }).out?.screen && LEVELS[this.governor.level].treesOnScreen)
+        this.wantTree();
       const later = p.later;
       if (later)
         this.side(later.t, () => this.enqueue(async () => this.applyFront(later.front, later.t)));
@@ -534,12 +718,39 @@ export class Recorder {
     later?: { front: FrontAnswer; t: number } | null;
   }> {
     const ctx = a.ctx as Ctx;
+    if (ctx.crop) this.openCrops.delete(ctx.crop); // synchronously, in onAct
+    let keepCrop = false;
+    try {
+      const p = await this.prepareAct(a, ctx);
+      keepCrop = p.keepCrop;
+      return p;
+    } finally {
+      const crop = ctx.crop;
+      if (crop) {
+        await crop.answer; // the helper is done with the file before it is renamed or deleted
+        crop.slot.done(keepCrop && !this.paused);
+        if (keepCrop && !this.paused) this.ocr?.image(crop.slot.path.replace(/\.hold$/, ""));
+      }
+    }
+  }
+
+  private async prepareAct(
+    a: Folded<Ctx>,
+    ctx: Ctx,
+  ): Promise<{
+    event: Event | null;
+    front: FrontAnswer | null;
+    later?: { front: FrontAnswer; t: number } | null;
+    keepCrop: boolean;
+  }> {
     const front = (await ctx.front) ?? this.lastFront; // no answer in 50 ms: the last one known
-    if (gateOf(this.gate, ...frontParts(front)) !== null) return { event: null, front };
+    if (gateOf(this.gate, ...frontParts(front)) !== null)
+      return { event: null, front, keepCrop: false };
     const c = this.coords();
     let target = await ctx.target;
     if (target === null && ctx.at && this.d.probe.running)
       target = await this.d.probe.at(ctx.at.x, ctx.at.y, AT_MS, AT_WAIT_MS);
+    this.journal.stats.probe(target !== null);
     let text: { text: string; redacted: boolean } | null = null;
     if (a.kind === "text") {
       if (target === null && this.d.probe.available)
@@ -550,7 +761,7 @@ export class Recorder {
     }
     const beforeFrame = await ctx.before;
     const before = await this.screen.number(beforeFrame);
-    const shot = await this.screen.afterFrame(this.d.sleep);
+    const shot = await this.screen.afterFrame(this.d.sleep, this.t0 + a.end);
     const after = shot.n;
     const laterFront = await this.front();
     const later = laterFront?.app ? { front: laterFront, t: this.t(this.clock.now()) } : null;
@@ -561,6 +772,14 @@ export class Recorder {
     const window = logicalWindow(c, front?.window);
     const display =
       beforeFrame?.shot.display ?? ("x" in act ? this.d.displayAt?.(act.x, act.y) : undefined);
+    if (!element) this.journal.stats.s.nullElement++;
+    const secure = !!target?.element?.secure;
+    if (secure) {
+      // never read a password field's screen, nor keep its crop
+      if (before !== null && beforeFrame?.path) this.ocr?.skip(beforeFrame.path);
+      if (shot.path) this.ocr?.skip(shot.path);
+    }
+    const crop = ctx.crop && !secure && (await ctx.crop.answer) !== null ? ctx.crop.slot.n : null;
     const event = {
       ...act,
       ...(text ?? {}),
@@ -571,10 +790,14 @@ export class Recorder {
       ...(element ? { element } : {}),
       ...(before !== null ? { before } : {}),
       ...(after !== null ? { after } : {}),
+      ...(shot.settle !== undefined ? { settle: shot.settle } : {}),
+      ...(shot.settled === false ? { settled: false } : {}),
+      ...(ctx.path ? { path: ctx.path } : {}),
+      ...(crop !== null ? { crop } : {}),
       out,
       ...(ctx.tree !== null ? { tree: ctx.tree } : {}),
     } as Event;
-    return { event, front, later };
+    return { event, front, later, keepCrop: crop !== null };
   }
 
   /**
@@ -681,7 +904,7 @@ export class Recorder {
   async task(): Promise<void> {
     if (this.prompting || this.paused || this.stopped || !this.d.ask) return;
     this.prompting = true;
-    this.folder.flush();
+    this.flush();
     try {
       const answer = await this.d.ask(TASK_QUESTION);
       if (answer === null || this.stopped || this.paused) return;
@@ -703,7 +926,7 @@ export class Recorder {
     const now = this.paused;
     if (now === this.written) return;
     this.written = now;
-    if (now === "excluded" || now === "locked") this.folder.flush();
+    if (now === "excluded" || now === "locked") this.flush();
     const e: Event = now
       ? { kind: "pause", reason: now, t, ts: this.ts(t) }
       : { kind: "resume", t, ts: this.ts(t) };

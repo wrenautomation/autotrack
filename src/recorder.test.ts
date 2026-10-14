@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseConfig } from "./config.ts";
 import type { App, Element, Event, Raw } from "./events.ts";
+import type { OcrReader } from "./ocr.ts";
 import type { ClipboardChange, FrontAnswer, TreeAnswer } from "./probe.ts";
-import { outOf, type ProbeLike, Recorder } from "./recorder.ts";
+import { outOf, type ProbeLike, Recorder, type RecorderDeps } from "./recorder.ts";
 import type { Capturer } from "./screen.ts";
 
 const T0 = Date.UTC(2030, 5, 1, 12, 0, 0);
@@ -37,6 +38,9 @@ function setup(
     ) => { element: Element | null } | null;
     tree?: () => TreeAnswer | null | Promise<TreeAnswer | null>;
     ask?: (q: string) => Promise<string | null>;
+    /** The sleep moves the clock (settle loops see time pass). */
+    clocked?: boolean;
+    deps?: Partial<RecorderDeps>;
   } = {},
 ) {
   const sessions = mkdtempSync(join(tmpdir(), "track-recorder-"));
@@ -45,6 +49,8 @@ function setup(
   let front: FrontAnswer = { app: app("TextEdit", "com.apple.TextEdit", 10), window: win("Notes") };
   let shade = 0;
   let still = false; // the screen stops changing
+  const crops: { x: number; y: number; size: number; path: string }[] = [];
+  const grabsAt: number[] = [];
   let onClip: (c: ClipboardChange) => void = () => {};
   let onRaw: (r: Raw) => void = () => {};
   const notes: string[] = [];
@@ -67,6 +73,7 @@ function setup(
   const capturer: Capturer = {
     displays: () => [{ id: "1", x: 0, y: 0, width: 64, height: 36, scale: 1, primary: true }],
     grab: async () => {
+      grabsAt.push(now - 1000);
       if (!still) shade += 40;
       return {
         display: "1",
@@ -79,6 +86,11 @@ function setup(
     save: async (_shot, path) => {
       writeFileSync(path, new Uint8Array([0xff, 0xd8, 0xff, 0xd9]));
       return true;
+    },
+    crop: async (x, y, size, path) => {
+      crops.push({ x, y, size, path });
+      writeFileSync(path, new Uint8Array([0xff, 0xd8, 0xff, 0xd9]));
+      return { ok: true, w: size * 2, h: size * 2 };
     },
   };
   const rec = new Recorder({
@@ -96,7 +108,12 @@ function setup(
     ...(opts.ask ? { ask: opts.ask } : {}),
     clock: { now: () => now, epoch: () => T0 + now - 1000 },
     timers: false,
-    sleep: async () => {},
+    sleep: opts.clocked
+      ? async (ms) => {
+          now += ms;
+        }
+      : async () => {},
+    ...opts.deps,
   });
   rec.start();
   const at = (t: number) => {
@@ -106,14 +123,15 @@ function setup(
     at(r.t);
     onRaw({ ...r, t: 1000 + r.t } as Raw);
   };
-  const events = (): Event[] => {
+  /** Events as written; the quality kinds (`level`, `shot`) only with `all`. */
+  const events = (all = false): Event[] => {
     const out: Event[] = [];
     for (const seg of readdirSync(rec.journal.dir)
       .filter((n) => /^\d+$/.test(n))
       .sort())
       for (const l of readFileSync(join(rec.journal.dir, seg, "events.jsonl"), "utf8").split("\n"))
         if (l) out.push(JSON.parse(l));
-    return out;
+    return all ? out : out.filter((e) => e.kind !== "level" && e.kind !== "shot");
   };
   const typeText = (t0: number, s: string) => {
     [...s].forEach((c, i) => {
@@ -125,6 +143,9 @@ function setup(
     raw,
     at,
     events,
+    crops,
+    grabsAt,
+    sessions,
     notes,
     typeText,
     setFront: (f: FrontAnswer) => {
@@ -693,5 +714,204 @@ describe("recorder signal", () => {
     expect(big).not.toHaveProperty("tree");
     expect(small).toMatchObject({ tree: "small" });
     expect(r.file("000", "trees/0.txt")).toBe(page);
+  });
+});
+
+describe("recorder quality", () => {
+  it("a level event first, then one at each change", async () => {
+    let busy = false;
+    const r = setup({
+      deps: {
+        power: async () => ({ ac: true, battery: 90 }),
+        busy: () => ({ busy, why: busy ? "load 0.95 per core" : "load 0.10 per core" }),
+      },
+    });
+    await r.rec.settled();
+    await r.rec.levelTick();
+    busy = true;
+    r.at(10_000);
+    await r.rec.levelTick();
+    await r.rec.stop();
+    const levels = r.events(true).filter((e) => e.kind === "level");
+    expect(levels).toMatchObject([
+      { kind: "level", level: "full", why: "on AC, load 0.10 per core" },
+      { kind: "level", level: "lean", why: "system busy: load 0.95 per core" },
+    ]);
+    expect(r.rec.status()).toMatchObject({ level: "lean", why: "system busy: load 0.95 per core" });
+  });
+
+  it("a pinned level holds", async () => {
+    const r = setup({ deps: { pinned: "lean", busy: () => ({ busy: false, why: "calm" }) } });
+    await r.rec.levelTick();
+    await r.rec.stop();
+    expect(r.events(true).filter((e) => e.kind === "level")).toMatchObject([
+      { level: "lean", why: "pinned (AUTOTRACK_LEVEL)" },
+    ]);
+  });
+
+  it("a click: fresh before at button-down, settled after, approach path, crop", async () => {
+    const r = setup({ clocked: true });
+    r.raw({ type: "move", t: 100, x: 10, y: 10 });
+    r.raw({ type: "move", t: 300, x: 30, y: 40 });
+    r.raw({ type: "move", t: 450, x: 49, y: 59 });
+    r.raw({ type: "move", t: 455, x: 50, y: 60 }); // dropped by the 20 Hz fold, kept in the path
+    await r.rec.ringTick();
+    r.still(true);
+    r.raw({ type: "down", t: 500, x: 50, y: 60, button: "left" });
+    r.raw({ type: "up", t: 520, x: 50, y: 60, button: "left" });
+    await r.rec.settled();
+    await r.rec.stop();
+    expect(r.grabsAt).toContain(500); // grabbed at button-down
+    const click = r.events().find((e) => e.kind === "click") as Event & Record<string, unknown>;
+    expect(click).toMatchObject({ before: expect.any(Number), after: expect.any(Number) });
+    expect(click.before).not.toBe(click.after);
+    expect(click.settle).toBe(150); // the first still grab at 670, 150 ms after the up
+    expect(click.settled).toBeUndefined();
+    expect(click.path).toEqual([
+      [-400, 10, 10],
+      [-200, 30, 40],
+      [-50, 49, 59],
+      [-45, 50, 60],
+    ]);
+    expect(click.crop).toBe(0);
+    expect(r.crops).toMatchObject([{ x: 50, y: 60, size: 256 }]);
+    const seg = readdirSync(r.rec.journal.dir).find((n) => /^\d+$/.test(n)) as string;
+    expect(readdirSync(join(r.rec.journal.dir, seg, "crops"))).toEqual(["0.jpg"]);
+    const stats = JSON.parse(r.file(seg, "stats.json"));
+    expect(stats).toMatchObject({ crops: 1, nullElement: 0, events: { click: 1 } });
+    expect(stats.movesDropped).toBe(1);
+  });
+
+  it("a drag's path adds the moves while the button was held", async () => {
+    const r = setup();
+    r.raw({ type: "move", t: 100, x: 10, y: 10 });
+    r.raw({ type: "down", t: 200, x: 10, y: 10, button: "left" });
+    r.raw({ type: "move", t: 260, x: 40, y: 10 });
+    r.raw({ type: "move", t: 320, x: 80, y: 12 });
+    r.raw({ type: "up", t: 380, x: 80, y: 12, button: "left" });
+    await r.rec.stop();
+    const drag = r.events().find((e) => e.kind === "drag") as Event & Record<string, unknown>;
+    expect(drag.path).toEqual([
+      [-100, 10, 10],
+      [60, 40, 10],
+      [120, 80, 12],
+    ]);
+  });
+
+  it("no crop on a secure element, nor at lean; secure frames are never read", async () => {
+    const reads: string[] = [];
+    const r = setup({
+      at: () => ({ element: field(true) }),
+      deps: {
+        ocr: (): OcrReader => ({
+          read: async (p) => {
+            reads.push(p);
+            return { lines: [], w: 1, h: 1 };
+          },
+          close: () => {},
+        }),
+      },
+    });
+    r.click(100);
+    await r.rec.settled();
+    const click = r.events().find((e) => e.kind === "click") as Event & Record<string, unknown>;
+    expect(click.crop).toBeUndefined();
+    const seg = join(r.rec.journal.dir, r.rec.journal.segment);
+    expect(readdirSync(join(seg, "crops"))).toEqual([]);
+    expect(JSON.parse(readFileSync(join(seg, "ocr", `${click.before}.json`), "utf8"))).toEqual({
+      skipped: "secure",
+    });
+    await r.rec.stop();
+
+    const lean = setup({ deps: { pinned: "lean" } });
+    await lean.rec.levelTick();
+    lean.click(100);
+    await lean.rec.stop();
+    expect(lean.crops).toEqual([]);
+    const c = lean.events().find((e) => e.kind === "click") as Event & Record<string, unknown>;
+    expect(c.settle).toBeUndefined();
+  });
+
+  it("a shot event per written frame: grab time and the cursor then", async () => {
+    const r = setup();
+    r.raw({ type: "move", t: 100, x: 20, y: 30 });
+    r.click(200, 20, 30);
+    await r.rec.stop();
+    const all = r.events(true);
+    const shots = all.filter((e) => e.kind === "shot") as Extract<Event, { kind: "shot" }>[];
+    const click = all.find((e) => e.kind === "click") as Extract<Event, { kind: "click" }>;
+    expect(shots.map((s) => s.frame).sort()).toEqual([click.before, click.after].sort());
+    expect(shots.find((s) => s.frame === click.before)).toMatchObject({
+      at: 200,
+      x: 20,
+      y: 30,
+      display: "1",
+    });
+    const ts = all.map((e) => e.t);
+    expect(ts).toEqual([...ts].sort((a, b) => a - b));
+  });
+
+  it("stats.json per segment and totals in session.json; .done waits for OCR", async () => {
+    let reads = 0;
+    const r = setup({
+      deps: {
+        ocr: () => ({
+          read: async () => {
+            reads++;
+            return { lines: [{ text: "Submit", x: 1, y: 2, w: 3, h: 4, conf: 1 }], w: 64, h: 36 };
+          },
+          close: () => {},
+        }),
+      },
+    });
+    r.click(100);
+    await r.rec.settled();
+    const seg = join(r.rec.journal.dir, r.rec.journal.segment);
+    r.at(60_000); // idle 20 s and more
+    r.rec.ocr?.tick();
+    await new Promise((res) => setTimeout(res, 10));
+    expect(reads).toBeGreaterThan(0);
+    await r.rec.stop();
+    expect(existsSync(join(seg, ".done"))).toBe(true);
+    const stats = JSON.parse(readFileSync(join(seg, "stats.json"), "utf8"));
+    expect(stats.ocr.done).toBe(reads);
+    expect(stats.frames.saved).toBeGreaterThan(0);
+    const meta = JSON.parse(readFileSync(join(r.rec.journal.dir, "session.json"), "utf8"));
+    expect(meta.totals.ocr.done).toBe(reads);
+    expect(meta.totals.frames.saved).toBe(stats.frames.saved);
+  });
+
+  it("input stops OCR within the input call", async () => {
+    let closed = 0;
+    let started = 0;
+    const r = setup({
+      deps: {
+        ocr: () => {
+          started++;
+          let hold: (v: null) => void = () => {};
+          return {
+            read: () =>
+              new Promise((res) => {
+                hold = res;
+              }),
+            close: () => {
+              closed++;
+              hold(null);
+            },
+          };
+        },
+      },
+    });
+    r.click(100);
+    await r.rec.settled();
+    r.at(60_000);
+    r.rec.ocr?.tick();
+    await new Promise((res) => setTimeout(res, 0));
+    expect(started).toBe(1);
+    r.raw({ type: "move", t: 60_010, x: 1, y: 1 });
+    expect(closed).toBe(1);
+    await r.rec.stop();
+    const seg = join(r.rec.journal.dir, "000");
+    expect(existsSync(join(seg, ".done"))).toBe(false); // left for the next start
   });
 });

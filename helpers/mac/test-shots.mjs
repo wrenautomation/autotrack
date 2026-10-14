@@ -1,4 +1,4 @@
-// Mac shots test: spawns `./probe --shots`, checks displays/grab/save, the ring, and prints per-op timing
+// Mac shots test: spawns `./probe --shots`, checks displays/grab/save/crop/usage, the ring, and prints per-op timing
 // (p50/p95 over N runs) and the helper's RSS. Needs Screen Recording granted to the terminal.
 // usage: node test-shots.mjs [runs]   (AUTOTRACK_SHOTS_SCK=1 tests the ScreenCaptureKit fallback)
 import { execFileSync, spawn } from "node:child_process";
@@ -44,6 +44,19 @@ const hamming = (a, b) => {
   return n;
 };
 const dir = mkdtempSync(join(tmpdir(), "autotrack-shots-"));
+/** The display's native pixel width, read apart from the helper (frames are fit to 1920 px, crops not). */
+const displayPixels = (id) => {
+  try {
+    const out = execFileSync(
+      "swift",
+      ["-e", `import CoreGraphics; print(CGDisplayCopyDisplayMode(${id})!.pixelWidth)`],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 60_000 },
+    );
+    return Number(out.trim()) || null;
+  } catch {
+    return null;
+  }
+};
 
 try {
   const { displays } = await ask({ op: "displays" });
@@ -146,6 +159,46 @@ try {
   const dist = hamming(h1.hash, h2.hash);
   console.log(`hash of two consecutive grabs: ${h1.hash} ${h2.hash} hamming ${dist}`);
   check(dist <= 8, `consecutive grabs of a still screen hash close (hamming ${dist})`);
+
+  // crop: a 256-point square at native pixels, inside the display, atomic
+  const cropPath = join(dir, "c.jpg.hold");
+  const c = await ask({
+    op: "crop",
+    display: main.id,
+    x: main.x + 10,
+    y: main.y + 10,
+    w: 256,
+    h: 256,
+    path: cropPath,
+    quality: 85,
+  });
+  console.log("crop", JSON.stringify(c));
+  check(c.ok === true && isNum(c.bytes) && c.bytes > 100, `crop: ${JSON.stringify(c)}`);
+  check(existsSync(cropPath) && statSync(cropPath).size === c.bytes, "crop file size matches");
+  check(!existsSync(`${cropPath}.tmp`), "crop leaves no .tmp");
+  const px = displayPixels(main.id);
+  const k = px ? px / main.width : null;
+  check(
+    k === null || (Math.abs(c.w - 256 * k) <= 1 && Math.abs(c.h - 256 * k) <= 1),
+    `crop is 256 points at native pixels (${c.w}x${c.h}, ${k} px/pt)`,
+  );
+  const cBad = await ask({
+    op: "crop",
+    display: "999999",
+    x: 0,
+    y: 0,
+    w: 10,
+    h: 10,
+    path: cropPath,
+  });
+  check(cBad.ok === false && typeof cBad.error === "string", "crop of an unknown display fails");
+
+  // usage: own CPU ms and RSS
+  const u = await ask({ op: "usage" });
+  check(
+    isNum(u.cpuMs) && u.cpuMs > 0 && isNum(u.rssMb) && u.rssMb > 0,
+    `usage: ${JSON.stringify(u)}`,
+  );
 
   // timing
   const grabMs = [];

@@ -1,9 +1,24 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Event, SessionMeta } from "./events.ts";
-import { closeStale, Journal, sessionName } from "./journal.ts";
+import {
+  closeStale,
+  finishSegment,
+  Journal,
+  ocrCounts,
+  readStats,
+  sessionName,
+} from "./journal.ts";
 
 const T0 = Date.UTC(2030, 0, 2, 3, 4, 5);
 const meta = {
@@ -160,5 +175,93 @@ describe("journal", () => {
     expect(lines(join(crashed.dir, "000", "events.jsonl")).length).toBe(1);
     next.close();
     expect(closeStale(sessions)).toBe(0);
+  });
+});
+
+describe("journal quality", () => {
+  const jpeg = (p: string) => writeFileSync(p, "x");
+
+  it("stats.json at close: events by kind, frames saved / failed / reused, crops", () => {
+    const j = new Journal({ sessions: tmp(), meta, now: () => T0 });
+    j.write(ev(1));
+    j.write({ kind: "click", t: 2, ts: T0, x: 1, y: 1, button: "left", count: 1 });
+    const f0 = j.reserveFrame();
+    jpeg(f0.path);
+    f0.done(true);
+    j.reserveFrame().done(false);
+    j.reserveFrame().done("reused");
+    const c = j.reserveCrop();
+    expect(c.path.endsWith("crops/0.jpg.hold")).toBe(true);
+    jpeg(c.path);
+    c.done(true);
+    const c2 = j.reserveCrop();
+    jpeg(c2.path);
+    c2.done(false); // a secure element: deleted
+    j.close();
+    const seg = join(j.dir, "000");
+    expect(readdirSync(join(seg, "crops"))).toEqual(["0.jpg"]);
+    const s = readStats(seg);
+    expect(s).toMatchObject({
+      segment: "000",
+      closedAt: new Date(T0).toISOString(),
+      events: { move: 1, click: 1 },
+      frames: { saved: 1, failed: 1, slotReused: 1 },
+      crops: 1,
+      ocr: { done: 0, same: 0, failed: 0, skipped: 2 }, // no OCR: both images skipped
+    });
+    expect(readMeta(j.dir).totals).toMatchObject({ crops: 1, frames: { saved: 1 } });
+    expect(existsSync(join(seg, ".done"))).toBe(true);
+  });
+
+  it("with waitOcr, .done waits for finish; the OCR counts come from the ocr files", () => {
+    const closed: string[] = [];
+    const j = new Journal({
+      sessions: tmp(),
+      meta,
+      now: () => T0,
+      waitOcr: true,
+      onClosed: (sd) => closed.push(sd),
+    });
+    j.write(ev(1));
+    for (let i = 0; i < 4; i++) {
+      const f = j.reserveFrame();
+      jpeg(f.path);
+      f.done(true);
+    }
+    j.close();
+    const seg = join(j.dir, "000");
+    expect(closed).toEqual([seg]);
+    expect(existsSync(join(seg, ".done"))).toBe(false);
+    mkdirSync(join(seg, "ocr"));
+    writeFileSync(join(seg, "ocr", "0.json"), JSON.stringify({ lines: [], w: 1, h: 1 }));
+    writeFileSync(join(seg, "ocr", "1.json"), JSON.stringify({ same: 0 }));
+    writeFileSync(join(seg, "ocr", "2.json"), JSON.stringify({ skipped: "secure" }));
+    expect(ocrCounts(seg)).toEqual({ done: 1, same: 1, failed: 0, skipped: 2 });
+    finishSegment(seg);
+    expect(existsSync(join(seg, ".done"))).toBe(true);
+    expect(readStats(seg)?.ocr).toEqual({ done: 1, same: 1, failed: 0, skipped: 2 });
+    expect(readMeta(j.dir).totals?.ocr).toEqual({ done: 1, same: 1, failed: 0, skipped: 2 });
+  });
+
+  it("a crash: the next start writes recovered stats, sweeps held crops, waits for OCR when asked", () => {
+    const sessions = tmp();
+    const j = new Journal({ sessions, meta, now: () => T0 });
+    j.write(ev(1));
+    const f = j.reserveFrame();
+    jpeg(f.path);
+    f.done(true);
+    const c = j.reserveCrop();
+    jpeg(c.path); // never released: the crash
+    const seg = join(j.dir, "000");
+    expect(closeStale(sessions, undefined, true)).toBe(1);
+    expect(existsSync(join(seg, "crops", "0.jpg.hold"))).toBe(false);
+    expect(readStats(seg)).toMatchObject({
+      recovered: true,
+      events: { move: 1 },
+      frames: { saved: 1 },
+    });
+    expect(existsSync(join(seg, ".done"))).toBe(false); // waits for OCR
+    closeStale(sessions);
+    expect(existsSync(join(seg, ".done"))).toBe(true);
   });
 });

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Mac end to end (CI only: it posts real input). Installs the built bundle with a fake install code
-# pointing at the local S3 stub, drives TextEdit and a password form with CGEvents, stops, ships,
-# checks what the stub received, then uninstalls and checks nothing is left registered.
+# pointing at the local S3 stub, drives TextEdit and a password form with CGEvents, waits idle for
+# OCR and prints `doctor` (level and cost), stops, ships, checks what the stub received, then
+# uninstalls and checks nothing is left registered.
 #
 #   sh test/e2e/mac.sh        (after `node scripts/bundle.mjs`; needs node on PATH and swiftc)
 set -eu
@@ -88,6 +89,8 @@ done
 "$cli" status
 
 step "Drive input"
+# doctor measures the running recorder over 10 s while the input below is driven: the active cost.
+"$cli" doctor >"$work/doctor-active.log" 2>&1 &
 : >"$work/note.txt"
 open -a TextEdit "$work/note.txt"
 sleep 3
@@ -154,6 +157,30 @@ case ",$soft," in
   ;;
 esac
 
+step "idle: OCR, doctor"
+# OCR runs only after 20 s without input, one image at a time; poll for a read that found text.
+case ",$soft," in
+*,screen,*) echo "::warning::e2e: no Screen Recording: no frames to read" ;;
+*)
+  i=0
+  until grep -rlsE '"text":"[^"]*([Hh]ello|Submit)' "$data/sessions" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ $i -ge 60 ]; then
+      echo "::warning::e2e: no OCR with the known text after 180 s"
+      break
+    fi
+    sleep 3
+  done
+  echo "ocr files: $(find "$data/sessions" -path '*/ocr/*' -name '*.json' | wc -l | tr -d ' ')"
+  ;;
+esac
+echo "-- doctor while input was driven:"
+cat "$work/doctor-active.log" || true
+echo "-- doctor idle:"
+"$cli" doctor || true
+crop_px=$(swift -e 'import CoreGraphics; let d = CGMainDisplayID(); print(Int((256 * Double(CGDisplayCopyDisplayMode(d)!.pixelWidth) / Double(CGDisplayBounds(d).width)).rounded()))' 2>/dev/null || true)
+echo "crop at native pixels: ${crop_px:-unknown} px"
+
 step "stop, ship"
 "$cli" stop
 i=0
@@ -167,7 +194,8 @@ osascript -e 'tell application "TextEdit" to quit saving no' 2>/dev/null || true
 cat "$work/stub.log"
 
 step "check"
-node "$repo/test/e2e/check.mjs" --dir "$work/s3/$bucket/$device" --mac --soft "$soft"
+node "$repo/test/e2e/check.mjs" --dir "$work/s3/$bucket/$device" --mac --soft "$soft" \
+  ${crop_px:+--crop-px "$crop_px"}
 
 step "uninstall --yes"
 cp "$data"/*.log "$work/" 2>/dev/null || true

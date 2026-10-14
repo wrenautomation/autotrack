@@ -1,7 +1,7 @@
 # Windows end to end (CI only: it sends real input). Installs the built bundle with install.ps1 and a
 # fake install code pointing at the local S3 stub, types into Notepad and a password form with
-# SendInput, stops, ships, checks what the stub received, then uninstalls and checks nothing is
-# left registered.
+# SendInput, waits idle for OCR and prints `doctor` (level and cost), stops, ships, checks what the
+# stub received, then uninstalls and checks nothing is left registered.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File test\e2e\win.ps1   (after scripts/bundle.mjs)
 $ErrorActionPreference = 'Stop'
@@ -147,6 +147,10 @@ try {
     Native { & $cli status }
 
     Step 'Drive input'
+    # doctor measures the running recorder over 10 s while the input below is driven: the active cost.
+    $doctorLog = Join-Path $work 'doctor-active.log'
+    $doctor = Start-Process -FilePath $cli -ArgumentList 'doctor' -PassThru -NoNewWindow `
+        -RedirectStandardOutput $doctorLog -RedirectStandardError (Join-Path $work 'doctor-active.err')
     $notepad = Start-Process notepad -PassThru
     $h = [IntPtr]::Zero
     for ($i = 0; $h -eq [IntPtr]::Zero; $i++) {
@@ -205,6 +209,28 @@ try {
     [Drive]::Key(0x0D) # Enter
     Start-Sleep -Seconds 2
 
+    Step 'idle: OCR, doctor'
+    # OCR runs only after 20 s without input, one image at a time; poll for a read that found text.
+    $sessionsDir = Join-Path $data 'sessions'
+    for ($i = 0; $true; $i++) {
+        $hit = Get-ChildItem -Path $sessionsDir -Recurse -Filter '*.json' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Directory.Name -eq 'ocr' } |
+            Where-Object { (Get-Content $_.FullName -Raw) -match '"text":"[^"]*(hello|Submit)' } | Select-Object -First 1
+        if ($hit) { Write-Host "ocr: known text in $($hit.FullName)"; break }
+        if ($i -ge 60) { Write-Host '::warning::e2e: no OCR with the known text after 180 s'; break }
+        Start-Sleep -Seconds 3
+    }
+    if ($doctor) { [void]$doctor.WaitForExit(60000) }
+    Write-Host '-- doctor while input was driven:'
+    Get-Content $doctorLog -ErrorAction SilentlyContinue
+    Write-Host '-- doctor idle:'
+    Native { & $cli doctor }
+    # 256 points at the primary display's native pixels, from the installed shots helper.
+    $disp = Native { '{"id":1,"op":"displays"}' | & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $app 'helpers\win\probe.ps1') --shots } | ConvertFrom-Json
+    $primary = @($disp.displays | Where-Object { $_.primary })[0]
+    $cropPx = [math]::Round(256 * $primary.os.scale)
+    Write-Host "crop at native pixels: $cropPx px"
+
     Step 'stop, ship'
     Native { & $cli stop }
     for ($i = 0; Running; $i++) {
@@ -216,7 +242,7 @@ try {
     Get-Content (Join-Path $work 'stub.log')
 
     Step 'check'
-    Native { & node (Join-Path $repo 'test\e2e\check.mjs') --dir (Join-Path $work "s3\$bucket\$device") }
+    Native { & node (Join-Path $repo 'test\e2e\check.mjs') --dir (Join-Path $work "s3\$bucket\$device") --crop-px $cropPx }
     if ($LASTEXITCODE -ne 0) { Die 'e2e checks failed' }
 
     Step 'uninstall --yes'

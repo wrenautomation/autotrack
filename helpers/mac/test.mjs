@@ -92,6 +92,9 @@ check("element" in focused, "focused shape");
 if (focused.element) check(isElement(focused.element), "focused element shape");
 console.log("focused", JSON.stringify(focused));
 
+const usage = await ask({ op: "usage" });
+check(usage.cpuMs >= 0 && usage.rssMb > 0, `usage shape: ${JSON.stringify(usage)}`);
+
 const bad = await ask({ op: "nope" });
 check(typeof bad.error === "string", "unknown op answers an error");
 const badAt = await ask({ op: "at" });

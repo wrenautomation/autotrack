@@ -3,7 +3,9 @@
 // "Probe protocol". `tree` is answered from a worker queue (seconds, not 50 ms) and `watch` makes the
 // helper push `{"event":"clipboard",…}` lines on a 4 Hz changeCount poll; one lock keeps lines whole.
 // `probe --shots` is the same binary as a second process that only takes screen frames (ops grab,
-// save, displays; see "Shots protocol"), so a capture never delays a probe answer.
+// save, crop, displays; see "Shots protocol"), so a capture never delays a probe answer.
+// `probe --ocr` is a third, started on demand: op read {path} runs Vision text recognition on one
+// image at background QoS. Every mode answers `usage` (its own CPU ms and resident MB).
 // Never returns an element's value, nor a name that shows it (a text field named by its content).
 // Coordinates: global points, origin top-left (same as uiohook).
 // Elements also carry path (ancestors up to the window), id, cls, url, help; each omitted when empty.
@@ -14,6 +16,7 @@ import IOKit.hid
 import Carbon.HIToolbox
 import ImageIO
 import ScreenCaptureKit
+import Vision
 
 setvbuf(stdout, nil, _IOLBF, 0)
 signal(SIGPIPE, SIG_IGN)
@@ -460,6 +463,7 @@ func handle(_ req: [String: Any]) -> [String: Any]? {
     case "focused": res["element"] = opFocused()
     case "front": res.merge(opFront()) { $1 }
     case "perm": res.merge(opPerm()) { $1 }
+    case "usage": res.merge(opUsage()) { $1 }
     default: res["error"] = "unknown op"
     }
     return res
@@ -661,14 +665,134 @@ func opSave(_ req: [String: Any]) -> [String: Any] {
     if let seq = (req["seq"] as? NSNumber)?.intValue, seq != slot.seq { return fail("slot reused") }
     guard let image = ctx.makeImage() else { return fail("no image") }
     let q = min(100, max(1, (req["quality"] as? NSNumber)?.doubleValue ?? 70)) / 100
-    let tmp = path + ".tmp"
-    guard let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: tmp) as CFURL, "public.jpeg" as CFString, 1, nil)
-    else { return fail("cannot write \(tmp)") }
-    CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: q] as CFDictionary)
-    guard CGImageDestinationFinalize(dest) else { unlink(tmp); return fail("encode failed") }
-    guard rename(tmp, path) == 0 else { unlink(tmp); return fail("rename failed: \(String(cString: strerror(errno)))") }
+    if let err = writeJPEG(image, path, q) { return fail(err) }
     var st = stat()
     return ["ok": true, "bytes": stat(path, &st) == 0 ? Int(st.st_size) : 0]
+}
+
+func writeJPEG(_ image: CGImage, _ path: String, _ q: Double) -> String? {
+    let tmp = path + ".tmp"
+    guard let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: tmp) as CFURL, "public.jpeg" as CFString, 1, nil)
+    else { return "cannot write \(tmp)" }
+    CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: q] as CFDictionary)
+    guard CGImageDestinationFinalize(dest) else { unlink(tmp); return "encode failed" }
+    guard rename(tmp, path) == 0 else { unlink(tmp); return "rename failed: \(String(cString: strerror(errno)))" }
+    return nil
+}
+
+// Crop: one rect of a display at its native pixels. SCK `sourceRect` (display-local points) with the
+// output sized to the rect's pixels; the fallback is CGDisplayCreateImageForRect, looked up like the
+// full-display one. Both answer native pixels, so small text the 1920 px frame loses stays readable.
+typealias DisplayRectImageFn = @convention(c) (CGDirectDisplayID, CGRect) -> Unmanaged<CGImage>?
+let displayRectImageFn: DisplayRectImageFn? = {
+    guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGDisplayCreateImageForRect") else { return nil }
+    return unsafeBitCast(sym, to: DisplayRectImageFn.self)
+}()
+
+@available(macOS 14.0, *)
+func sckCrop(_ id: CGDirectDisplayID, _ local: CGRect, _ w: Int, _ h: Int) -> CGImage? {
+    guard let filter = sckFilter(id) else { return nil }
+    let cfg = SCStreamConfiguration()
+    cfg.sourceRect = local
+    cfg.width = w
+    cfg.height = h
+    cfg.showsCursor = false
+    let sem = DispatchSemaphore(value: 0)
+    var out: CGImage?
+    SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg) { image, _ in
+        out = image
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 3)
+    if out == nil { sckFilters[id] = nil }
+    return out
+}
+
+func opCrop(_ req: [String: Any]) -> [String: Any] {
+    func fail(_ why: String) -> [String: Any] { ["ok": false, "error": why] }
+    guard let idStr = req["display"] as? String, let id = UInt32(idStr),
+          let d = displayInfos().first(where: { $0.id == id }) else { return fail("no such display") }
+    guard let x = num(req["x"]), let y = num(req["y"]), let w = num(req["w"]), let h = num(req["h"]), w >= 1, h >= 1,
+          let path = req["path"] as? String, !path.isEmpty else { return fail("bad request") }
+    // display-local points, kept inside the display
+    let b = d.bounds
+    let lx = min(max(0, x - Double(b.origin.x)), Double(b.width) - 1)
+    let ly = min(max(0, y - Double(b.origin.y)), Double(b.height) - 1)
+    let local = CGRect(x: lx, y: ly, width: min(w, Double(b.width) - lx), height: min(h, Double(b.height) - ly))
+    let k = Double(d.pixelW) / Double(b.width)
+    let pw = max(1, Int((Double(local.width) * k).rounded())), ph = max(1, Int((Double(local.height) * k).rounded()))
+    var image: CGImage?
+    if !preferCG, #available(macOS 14.0, *) {
+        image = sckCrop(d.id, local, pw, ph)
+        if image == nil && forceSCK { return fail("capture failed") }
+    }
+    if image == nil, let fn = displayRectImageFn { image = fn(d.id, local)?.takeRetainedValue() }
+    guard let img = image else { return fail("capture failed") }
+    let q = min(100, max(1, num(req["quality"]) ?? 85)) / 100
+    if let err = writeJPEG(img, path, q) { return fail(err) }
+    var st = stat()
+    return ["ok": true, "bytes": stat(path, &st) == 0 ? Int(st.st_size) : 0, "w": img.width, "h": img.height]
+}
+
+/// This process's cumulative CPU ms (user + system) and resident MB.
+func opUsage() -> [String: Any] {
+    var ru = rusage()
+    getrusage(RUSAGE_SELF, &ru)
+    let cpu = Double(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000
+        + Double(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1000
+    var info = mach_task_basic_info()
+    var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
+    let kr = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+        }
+    }
+    let rss = kr == KERN_SUCCESS ? Double(info.resident_size) / 1_048_576 : 0
+    return ["cpuMs": cpu.rounded(), "rssMb": rss.rounded()]
+}
+
+func cpuNowMs() -> Double { (opUsage()["cpuMs"] as? Double) ?? 0 }
+
+// MARK: - OCR mode (`probe --ocr`)
+//
+// op read {path}: Vision `VNRecognizeTextRequest` (accurate, language correction on) over one JPEG.
+// Answers {lines: [{text, x, y, w, h, conf}], w, h, cpuMs} with each line's box in the image's pixels,
+// origin top-left, and the CPU this read cost. The whole process runs at background QoS.
+
+func opRead(_ req: [String: Any]) -> [String: Any] {
+    guard let path = req["path"] as? String, !path.isEmpty else { return ["error": "bad request"] }
+    guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+          let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return ["error": "cannot read \(path)"] }
+    let c0 = cpuNowMs()
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.usesLanguageCorrection = true
+    let handler = VNImageRequestHandler(cgImage: img, options: [:])
+    do { try handler.perform([request]) } catch { return ["error": "vision: \(error.localizedDescription)"] }
+    let w = Double(img.width), h = Double(img.height)
+    var lines: [[String: Any]] = []
+    for obs in request.results ?? [] {
+        guard let top = obs.topCandidates(1).first else { continue }
+        let bb = obs.boundingBox  // normalized, origin bottom-left
+        lines.append([
+            "text": top.string,
+            "x": (bb.minX * w).rounded(), "y": ((1 - bb.maxY) * h).rounded(),
+            "w": (bb.width * w).rounded(), "h": (bb.height * h).rounded(),
+            "conf": (Double(top.confidence) * 1000).rounded() / 1000,
+        ])
+    }
+    return ["lines": lines, "w": img.width, "h": img.height, "cpuMs": (cpuNowMs() - c0).rounded()]
+}
+
+func handleOcr(_ req: [String: Any]) -> [String: Any] {
+    var res: [String: Any]
+    switch req["op"] as? String {
+    case "read": res = opRead(req)
+    case "usage": res = opUsage()
+    default: res = ["error": "unknown op"]
+    }
+    res["id"] = req["id"] ?? NSNull()
+    return res
 }
 
 func handleShots(_ req: [String: Any]) -> [String: Any] {
@@ -677,6 +801,8 @@ func handleShots(_ req: [String: Any]) -> [String: Any] {
     case "displays": sckFilters = [:]; res = ["displays": displayInfos().map(displayJSON)]  // layout may have changed
     case "grab": res = opGrab(req)
     case "save": res = opSave(req)
+    case "crop": res = opCrop(req)
+    case "usage": res = opUsage()
     default: res = ["error": "unknown op"]
     }
     res["id"] = req["id"] ?? NSNull()
@@ -706,6 +832,9 @@ func serve(_ handler: ([String: Any]) -> [String: Any]?) {
 
 if CommandLine.arguments.contains("--shots") {
     serve(handleShots)
+} else if CommandLine.arguments.contains("--ocr") {
+    pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0)
+    serve(handleOcr)
 } else {
     serve(handle)
 }

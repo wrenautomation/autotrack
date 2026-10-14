@@ -1,5 +1,5 @@
 # autotrack probe (Windows): long-lived helper. One JSON request per line on stdin, one answer per
-# line on stdout. Ops: at, front, focused, perm, tree, watch. See designs/2026-10-13-autotrack.md
+# line on stdout. Ops: at, front, focused, perm, tree, watch, usage, power. See designs/2026-10-13-autotrack.md
 # "Probe protocol". `tree` is answered from a pool thread and `watch` starts an STA thread that
 # pushes `{"event":"clipboard",…}` lines; AutotrackBg's one locked writer keeps every line whole.
 # Windows PowerShell 5.1 syntax only. Run: powershell -NoProfile -ExecutionPolicy Bypass -File probe.ps1
@@ -17,13 +17,106 @@
 # text). Per-request errors answer null; the loop never dies.
 # UIA has no per-call timeout, so a hung app can stall one request; the caller times out to null.
 #
-# `--shots` starts the other long-lived helper instead: frames. Ops: displays, grab, save. See designs/
+# `--shots` starts the other long-lived helper instead: frames. Ops: displays, grab, save, crop, usage. See designs/
 # 2026-10-13-autotrack.md "Shots protocol". A BitBlt from the screen DC (CAPTUREBLT) with a HALFTONE
 # stretch to at most 1920 px on the long side lands in one of 4 DIB sections; save writes a JPEG
 # (System.Drawing, path.tmp then rename). Displays are logical points (physical / DPI scale), `os` is
-# the physical rect and DPI scale. Everything, JSON included, runs in C# after one compile.
+# the physical rect and DPI scale. Everything, JSON included, runs in C# after one compile. A crop is
+# a plain BitBlt of one rect (logical points x DPI) at physical pixels, no stretch.
+#
+# `--ocr` is the third helper, started on demand at BelowNormal priority: op read {path} runs
+# Windows.Media.Ocr (WinRT, from PowerShell 5.1 through AsTask) on one image and answers
+# {lines: [{text, x, y, w, h}], w, h, cpuMs}, each box the union of its words in image pixels. The
+# engine has no per-line confidence, so `conf` is absent.
 
 $ErrorActionPreference = 'Stop'
+
+function Write-AsciiLine([System.IO.Stream]$out, [string]$json) {
+    # Non-ASCII as \uXXXX: the line is the same bytes whatever the console code page.
+    $json = [regex]::Replace($json, '[^\x00-\x7e]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes($json + "`n")
+    $out.Write($bytes, 0, $bytes.Length)
+    $out.Flush()
+}
+
+function Get-Usage {
+    $p = [System.Diagnostics.Process]::GetCurrentProcess()
+    $p.Refresh()
+    return @{ cpuMs = [math]::Round($p.TotalProcessorTime.TotalMilliseconds); rssMb = [math]::Round($p.WorkingSet64 / 1MB) }
+}
+
+if ($args -contains '--ocr') {
+    try { [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'BelowNormal' } catch { }
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    $null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
+    $null = [Windows.Storage.FileAccessMode, Windows.Storage, ContentType = WindowsRuntime]
+    $null = [Windows.Storage.Streams.IRandomAccessStream, Windows.Storage.Streams, ContentType = WindowsRuntime]
+    $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
+    $null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
+    $null = [Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType = WindowsRuntime]
+    $null = [Windows.Media.Ocr.OcrResult, Windows.Media.Ocr, ContentType = WindowsRuntime]
+    $null = [Windows.Globalization.Language, Windows.Globalization, ContentType = WindowsRuntime]
+    # WinRT IAsyncOperation<T> to a Task<T> (PowerShell 5.1 has no await).
+    $asTask = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+        $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+        $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+    } | Select-Object -First 1
+    function Wait-Op($op, [Type]$type) {
+        $task = $asTask.MakeGenericMethod($type).Invoke($null, @($op))
+        $null = $task.Wait(-1)
+        return $task.Result
+    }
+    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    if ($null -eq $engine) {
+        try { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('en-US')) } catch { }
+    }
+    function Read-Image([string]$path) {
+        if ($null -eq $engine) { return @{ error = 'no OCR language installed' } }
+        if (-not (Test-Path -LiteralPath $path)) { return @{ error = "cannot read $path" } }
+        $c0 = (Get-Usage).cpuMs
+        $file = Wait-Op ([Windows.Storage.StorageFile]::GetFileFromPathAsync((Resolve-Path -LiteralPath $path).ProviderPath)) ([Windows.Storage.StorageFile])
+        $stream = Wait-Op ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+        try {
+            $decoder = Wait-Op ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+            $bitmap = Wait-Op ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+            try {
+                $result = Wait-Op ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+                $lines = New-Object System.Collections.ArrayList
+                foreach ($line in $result.Lines) {
+                    $x0 = [double]::MaxValue; $y0 = [double]::MaxValue; $x1 = 0.0; $y1 = 0.0
+                    foreach ($w in $line.Words) {
+                        $r = $w.BoundingRect
+                        $x0 = [math]::Min($x0, $r.X); $y0 = [math]::Min($y0, $r.Y)
+                        $x1 = [math]::Max($x1, $r.X + $r.Width); $y1 = [math]::Max($y1, $r.Y + $r.Height)
+                    }
+                    if ($x0 -eq [double]::MaxValue) { continue }
+                    $null = $lines.Add([ordered]@{
+                        text = $line.Text; x = [math]::Round($x0); y = [math]::Round($y0)
+                        w = [math]::Round($x1 - $x0); h = [math]::Round($y1 - $y0)
+                    })
+                }
+                return [ordered]@{ lines = $lines; w = $bitmap.PixelWidth; h = $bitmap.PixelHeight; cpuMs = (Get-Usage).cpuMs - $c0 }
+            } finally { $bitmap.Dispose() }
+        } finally { $stream.Dispose() }
+    }
+    $stdin = New-Object System.IO.StreamReader -ArgumentList ([Console]::OpenStandardInput()), (New-Object System.Text.UTF8Encoding -ArgumentList $false)
+    $stdout = [Console]::OpenStandardOutput()
+    while ($null -ne ($line = $stdin.ReadLine())) {
+        $line = $line.TrimStart([char]0xFEFF)
+        if ($line.Trim().Length -eq 0) { continue }
+        try { $req = $line | ConvertFrom-Json } catch { continue }
+        $res = [ordered]@{ id = $req.id }
+        try {
+            switch ([string]$req.op) {
+                'read' { $a = Read-Image ([string]$req.path); foreach ($k in $a.Keys) { $res[$k] = $a[$k] } }
+                'usage' { $a = Get-Usage; $res['cpuMs'] = $a.cpuMs; $res['rssMb'] = $a.rssMb }
+                default { $res['error'] = 'unknown op' }
+            }
+        } catch { $res['error'] = $_.Exception.Message }
+        Write-AsciiLine $stdout ($res | ConvertTo-Json -Compress -Depth 5)
+    }
+    exit 0
+}
 
 if ($args -contains '--shots') {
     Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
@@ -76,6 +169,7 @@ public static class AutotrackShots {
     [DllImport("gdi32.dll")] static extern int SetStretchBltMode(IntPtr dc, int mode);
     [DllImport("gdi32.dll")] static extern bool SetBrushOrgEx(IntPtr dc, int x, int y, IntPtr old);
     [DllImport("gdi32.dll")] static extern bool StretchBlt(IntPtr dst, int dx, int dy, int dw, int dh, IntPtr src, int sx, int sy, int sw, int sh, uint rop);
+    [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dst, int dx, int dy, int dw, int dh, IntPtr src, int sx, int sy, uint rop);
 
     const int MaxSide = 1920;
     const int RingSize = 4;
@@ -258,23 +352,78 @@ public static class AutotrackShots {
         long q = 70;
         object qObj;
         if (req.TryGetValue("quality", out qObj) && qObj is double) q = Math.Min(100, Math.Max(1, (long)(double)qObj));
-        string tmp = path + ".tmp";
         try {
-            ImageCodecInfo jpeg = null;
-            foreach (ImageCodecInfo c in ImageCodecInfo.GetImageEncoders()) if (c.MimeType == "image/jpeg") jpeg = c;
-            if (jpeg == null) return Fail("no JPEG encoder");
-            using (Bitmap bmp = new Bitmap(s.W, s.H, s.W * 4, PixelFormat.Format32bppRgb, s.Bits))
+            using (Bitmap bmp = new Bitmap(s.W, s.H, s.W * 4, PixelFormat.Format32bppRgb, s.Bits)) WriteJpeg(bmp, path, q);
+            return "\"ok\":true,\"bytes\":" + new FileInfo(path).Length;
+        } catch (Exception e) {
+            return Fail(e.Message);
+        }
+    }
+
+    static double NumOf(Dictionary<string, object> req, string key, double fallback) {
+        object v;
+        return req.TryGetValue(key, out v) && v is double ? (double)v : fallback;
+    }
+
+    static ImageCodecInfo Jpeg() {
+        foreach (ImageCodecInfo c in ImageCodecInfo.GetImageEncoders()) if (c.MimeType == "image/jpeg") return c;
+        return null;
+    }
+
+    static void WriteJpeg(Bitmap bmp, string path, long q) {
+        string tmp = path + ".tmp";
+        ImageCodecInfo jpeg = Jpeg();
+        if (jpeg == null) throw new Exception("no JPEG encoder");
+        try {
             using (EncoderParameters ep = new EncoderParameters(1)) {
                 ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, q);
                 bmp.Save(tmp, jpeg, ep);
             }
             if (File.Exists(path)) File.Delete(path);
             File.Move(tmp, path);
-            return "\"ok\":true,\"bytes\":" + new FileInfo(path).Length;
-        } catch (Exception e) {
+        } catch (Exception) {
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception) { }
-            return Fail(e.Message);
+            throw;
         }
+    }
+
+    // A rect in global logical points, at the display's physical pixels: one BitBlt, no stretch.
+    static string OpCrop(Dictionary<string, object> req) {
+        string id = Str(req, "display");
+        Display d = null;
+        foreach (Display e in Displays()) if (((long)e.Handle).ToString(CultureInfo.InvariantCulture) == id) d = e;
+        if (d == null) return Fail("no such display");
+        object pathObj;
+        req.TryGetValue("path", out pathObj);
+        string path = pathObj as string;
+        double lx = NumOf(req, "x", double.NaN), ly = NumOf(req, "y", double.NaN);
+        double lw = NumOf(req, "w", 0), lh = NumOf(req, "h", 0);
+        if (string.IsNullOrEmpty(path) || double.IsNaN(lx) || double.IsNaN(ly) || lw < 1 || lh < 1) return Fail("bad request");
+        // logical to physical: a display's logical origin is its physical origin / DPI
+        int w = Math.Min(d.W, Math.Max(1, (int)Math.Round(lw * d.Dpi)));
+        int h = Math.Min(d.H, Math.Max(1, (int)Math.Round(lh * d.Dpi)));
+        int x = Math.Max(d.X, Math.Min(d.X + d.W - w, (int)Math.Round(lx * d.Dpi)));
+        int y = Math.Max(d.Y, Math.Min(d.Y + d.H - h, (int)Math.Round(ly * d.Dpi)));
+        long q = Math.Min(100, Math.Max(1, (long)NumOf(req, "quality", 85)));
+        using (Bitmap bmp = new Bitmap(w, h, PixelFormat.Format32bppRgb)) {
+            using (Graphics g = Graphics.FromImage(bmp)) {
+                IntPtr dst = g.GetHdc();
+                IntPtr screen = GetDC(IntPtr.Zero);
+                bool ok;
+                try { ok = BitBlt(dst, 0, 0, w, h, screen, x, y, SrcCopy | CaptureBlt); }
+                finally { ReleaseDC(IntPtr.Zero, screen); g.ReleaseHdc(dst); }
+                if (!ok) return Fail("capture failed");
+            }
+            WriteJpeg(bmp, path, q);
+        }
+        return "\"ok\":true,\"bytes\":" + new FileInfo(path).Length + ",\"w\":" + w + ",\"h\":" + h;
+    }
+
+    static string OpUsage() {
+        System.Diagnostics.Process p = System.Diagnostics.Process.GetCurrentProcess();
+        p.Refresh();
+        return "\"cpuMs\":" + Math.Round(p.TotalProcessorTime.TotalMilliseconds).ToString(CultureInfo.InvariantCulture) +
+            ",\"rssMb\":" + Math.Round(p.WorkingSet64 / 1048576.0).ToString(CultureInfo.InvariantCulture);
     }
 
     static string Handle(Dictionary<string, object> req) {
@@ -287,9 +436,11 @@ public static class AutotrackShots {
                 body = "\"displays\":[" + string.Join(",", parts.ToArray()) + "]";
             } else if (op == "grab") body = OpGrab(req);
             else if (op == "save") body = OpSave(req);
+            else if (op == "crop") body = OpCrop(req);
+            else if (op == "usage") body = OpUsage();
             else body = "\"error\":\"unknown op\"";
         } catch (Exception e) {
-            body = (op == "save" ? "\"ok\":false," : "") + "\"error\":" + Quote(e.Message);
+            body = (op == "save" || op == "crop" ? "\"ok\":false," : "") + "\"error\":" + Quote(e.Message);
         }
         object id;
         string idText = "null";
@@ -429,6 +580,19 @@ public static class AutotrackNative {
         if ((StyleOf(h, -16) & 0x20) != 0) return true;
         IntPtr r;
         return SendMessageTimeoutW(h, 0xD2, IntPtr.Zero, IntPtr.Zero, 0x2, 50, out r) != IntPtr.Zero && r != IntPtr.Zero;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SYSTEM_POWER_STATUS { public byte AC, BatteryFlag, BatteryPercent, Saver; public int LifeTime, FullLifeTime; }
+    [DllImport("kernel32.dll")] static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS s);
+
+    // [ac, battery]: ac 1/0, -1 unknown; battery 0..100, -1 none or unknown.
+    public static int[] Power() {
+        SYSTEM_POWER_STATUS s;
+        if (!GetSystemPowerStatus(out s)) return new int[] { -1, -1 };
+        int ac = s.AC == 1 ? 1 : s.AC == 0 ? 0 : -1;
+        int pct = (s.BatteryFlag & 128) != 0 || s.BatteryPercent > 100 ? -1 : s.BatteryPercent;
+        return new int[] { ac, pct };
     }
 
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
@@ -1051,6 +1215,15 @@ function Invoke-Op($req) {
             }
             'perm' {
                 $res['accessibility'] = $true; $res['screen'] = $true; $res['input'] = $true
+            }
+            'usage' {
+                $u = Get-Usage
+                $res['cpuMs'] = $u.cpuMs; $res['rssMb'] = $u.rssMb
+            }
+            'power' {
+                $p = [AutotrackNative]::Power()
+                $res['ac'] = $(if ($p[0] -lt 0) { $null } else { $p[0] -eq 1 })
+                $res['battery'] = $(if ($p[1] -lt 0) { $null } else { $p[1] })
             }
             default { $res['error'] = 'unknown op' }
         }

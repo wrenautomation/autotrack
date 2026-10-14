@@ -496,6 +496,59 @@ every act says what quality it was captured at.
   `steps --min-quality` filters.
 - Import and label read `crops/`, `ocr/` and `stats.json` keys.
 
+### As built (machine side, 2026-10-13)
+
+Where the build is more exact than the bullets above. Field names are unchanged.
+
+- Level: `AUTOTRACK_LEVEL=full|normal|lean` pins it, for measuring one level. A pinned recorder
+  still measures its cost, and `why` says "pinned (AUTOTRACK_LEVEL)". A missing power or busy reading counts
+  as `normal`. A lean caused by own CPU holds until own CPU drops under 2%. The CPU window needs 50
+  of its 60 s covered before it counts. OCR CPU is not part of it.
+- Power: Mac parses `pmset -g batt`. Windows asks the probe (new op `power` →
+  `{ac, battery}`, null when unknown). A desktop with no battery is `{ac: true, battery: null}`.
+- Settle: "the same" is the frame-change rule (`differs`: 3+ gradient bits or a half's luma moving
+  by 2), not hash equality, so a blinking caret still settles. `settle` is ms from the act's end to
+  the first grab of the still pair. `settled` is written only when false. At `lean` there are no
+  settle fields.
+- `path` is one field: the approach points (dt < 0), then a drag's own points (dt ≥ 0). Points are
+  rounded to 0.1 point. A scroll's approach is taken at its first tick.
+- Crop: it is taken at button-down (a scroll: its first tick), and Node centres and clamps the
+  rect inside the display (`x, y` = top-left, global logical points). The file sits as
+  `crops/<n>.jpg.hold` until the act's element and app are known. It is renamed when kept, and
+  deleted on a secure element, an excluded app, a pause or a dropped act. The answer is
+  `{ok, bytes, w, h}`. Windows crops are one `BitBlt` at physical pixels (points × DPI). Mac uses
+  SCK `sourceRect` sized to the rect's native pixels, falling back to `CGDisplayCreateImageForRect`.
+- `shot`: `x, y` are logical points rounded to 0.1. A `ring` frame keeps its own grab time as `at`.
+- Video guard: if over 80% of idle grabs changed over 30 s with no input, idle grabs drop to one
+  every 10 s. Input or one still grab ends it.
+- `stats.json`: `{segment, closedAt, events, movesDropped, probe: {answers, timeouts},
+  nullElement, frames: {saved, failed, slotReused}, trees, crops, ocr: {done, same, failed,
+  skipped}, levels: {full, normal, lean} (seconds), restarts, recovered?}`. It is written at close
+  and rewritten when OCR finishes. `session.json` `totals` sums closed segments. A segment closed
+  by the next start after a crash has `recovered: true` and counts only what its files show.
+- OCR files: `{lines, w, h}` (read), `{same: m}`, `{failed: true}` (the helper errored or took
+  over 60 s), or `{skipped: "secure"}` (a frame of a password field). An image with no file at
+  `.done` counts as skipped. Line boxes are whole pixels, origin top-left. `conf` (0 to 1, three
+  decimals) is Mac only: Windows.Media.Ocr has none, and its box is the union of the line's words.
+- OCR helper: op `{"op":"read","path"}` → `{lines, w, h, cpuMs}`. Mac: Vision `.accurate` with
+  language correction, at QoS background. Windows: `Windows.Media.Ocr` through WinRT `AsTask`
+  from PowerShell 5.1, BelowNormal priority. It uses the user's profile languages, then en-US,
+  and errors when no OCR language is installed (the CI helper test adds
+  `Language.OCR~~~en-US~0.0.1.0`). Each run is a new helper, closed synchronously on the first
+  input (well under 100 ms), with the image requeued. Unknown power counts as AC.
+- `.done`: a segment closed while OCR is waiting gets `stats.json` and no `.done`. A restarted
+  recorder picks those up again, with the 2 h counted from their `closedAt`. `autotrack ship` with
+  no recorder running, and uninstall, finish them first and count unread images as skipped.
+- Ship: `crops/<n>.jpg`, `ocr/<n>.json.gz`, `ocr/c<n>.json.gz` and `stats.json` go up before
+  `events.jsonl.gz`. The local cap deletes crops along with frames, oldest first.
+- Every helper mode answers `usage` → `{cpuMs, rssMb}` (its own CPU and RSS). The status op adds
+  `level`, `why`, `cpuPct`, `helpers` and `ocr: {on, waiting, running, cpuMs}`. `doctor` prints
+  the level and why, then CPU and RSS split into recorder, probe and shots, then OCR CPU on its
+  own line.
+- Measured (`doctor`, 10 s, idle, M-series Mac at 2×, pinned level): full 1.42% of a core and
+  128 MB; normal 1.42%, 109 MB; lean 1.23%, 95 MB. OCR helper: 0.5 to 0.8 s CPU and 48 MB for a
+  640×200 image. The CI e2e prints `doctor` with input running and again idle, on both OSes.
+
 ## Decision log
 
 - Node + `uiohook-napi` over Rust: same language and redaction rules as autobrowse, the library

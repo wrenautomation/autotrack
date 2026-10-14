@@ -11,3 +11,9 @@ Elements carry `path` (up to 6 ancestors below the window, nearest first), and `
 `mac/probe --shots` and `win\probe.ps1 --shots` are a second helper for frames: `displays`, `grab` (into a ring of the last 4, at most 1920 px, with a 64-bit hash) and `save` (JPEG via a temp file and rename). `src/capture.ts` talks to it; the protocol is in `designs/2026-10-13-autotrack.md` under "Shots protocol". Mac uses ScreenCaptureKit on macOS 14+ (about 75 ms wall, 2.5 ms CPU, 55 MB RSS per grab) and falls back to `CGDisplayCreateImage` (about 40 ms CPU, 210 to 350 MB RSS). `AUTOTRACK_SHOTS_CG=1` forces the fallback and `AUTOTRACK_SHOTS_SCK=1` forces SCK, for measuring. Windows compiles its C# once at start, so the first answer takes a second or two.
 
 `mac/test.sh` also runs `mac/test-shots.mjs` (shapes, JPEG magic, ring reuse, p50/p95 per grab and save, helper RSS); it needs Screen Recording granted to the terminal. `win\test.ps1` runs the same checks against `--shots` (JPEG starts with FFD8, at most 1920 px, ring, timing).
+
+Shots mode also answers `crop` (one rect of a display at its native pixels, JPEG, for small text the 1920 px frame loses) and every mode answers `usage` (the helper's own CPU ms and RSS). The Windows probe answers `power` (`GetSystemPowerStatus`).
+
+## OCR mode
+
+`mac/probe --ocr` and `win\probe.ps1 --ocr` read text from one image per `read` request: Vision (accurate) on the Mac at background QoS, `Windows.Media.Ocr` on Windows at BelowNormal priority. Boxes are in image pixels, origin top-left; Windows gives no confidence. The recorder starts it only when the person is idle and kills it at the first input. `mac/test.sh` runs `mac/test-ocr.mjs` and `win\test.ps1` runs the same check, both on `test/fixtures/ocr-text.jpg`. A Windows install with no OCR language answers an error; the test adds en-US then.

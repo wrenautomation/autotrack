@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { checkFrames, QUALITY, Shots, ShotsCapturer } from "./capture.ts";
+import { CROP_QUALITY, checkFrames, cropRect, QUALITY, Shots, ShotsCapturer } from "./capture.ts";
 import type { HelperChild } from "./helper.ts";
 
 type Req = { id: number; op: string; [k: string]: unknown };
@@ -59,6 +59,19 @@ class FakeShots extends EventEmitter implements HelperChild {
         return this.reply({ id: req.id, ok: false, error: "slot reused" });
       return this.reply({ id: req.id, ok: true, bytes: 1234 });
     }
+    if (req.op === "crop") {
+      const d = this.displays.find((x) => x.id === req.display) as { scale: number } | undefined;
+      if (!d) return this.reply({ id: req.id, ok: false, error: "no such display" });
+      const k = req.display === "9" ? 2 : 1;
+      return this.reply({
+        id: req.id,
+        ok: true,
+        bytes: 900,
+        w: (req.w as number) * k,
+        h: (req.h as number) * k,
+      });
+    }
+    if (req.op === "usage") return this.reply({ id: req.id, cpuMs: 1234.5, rssMb: 41 });
     return this.reply({ id: req.id, error: "unknown op" });
   }
   kill() {
@@ -130,7 +143,7 @@ describe("shots client", () => {
     await capturer.refresh();
     const first = await capturer.grab(1, 1);
     for (let i = 0; i < 4; i++) await capturer.grab(1, 1);
-    expect(await capturer.save(first as never, "/data/old.jpg")).toBe(false);
+    expect(await capturer.save(first as never, "/data/old.jpg")).toBe("reused");
   });
 
   it("a grab from before a helper restart does not save", async () => {
@@ -190,5 +203,53 @@ describe("shots client", () => {
     const r = await checkFrames(bad.shots, "/data/doctor.jpg");
     expect(r.ok).toBe(false);
     expect(r.message).toMatch(/cannot grab the screen/);
+  });
+});
+
+describe("crops and usage", () => {
+  it("a crop is 256 points centred on the pointer, moved inside its display", () => {
+    const d = { x: 1000, y: 0, width: 800, height: 500 };
+    expect(cropRect(d, 1400, 250, 256)).toEqual({ x: 1272, y: 122, w: 256, h: 256 });
+    expect(cropRect(d, 1001, 2, 256)).toEqual({ x: 1000, y: 0, w: 256, h: 256 });
+    expect(cropRect(d, 1799, 499, 256)).toEqual({ x: 1544, y: 244, w: 256, h: 256 });
+    expect(cropRect({ x: 0, y: 0, width: 200, height: 100 }, 50, 50, 256)).toEqual({
+      x: 0,
+      y: 0,
+      w: 200,
+      h: 100,
+    });
+  });
+
+  it("asks the helper for the rect on the display under the point, at q85", async () => {
+    const { capturer, child } = setup();
+    await capturer.refresh();
+    expect(await capturer.crop(1400, 250, 256, "/data/c/0.jpg.hold")).toEqual({
+      ok: true,
+      w: 512,
+      h: 512,
+    });
+    expect(child().requests.at(-1)).toMatchObject({
+      op: "crop",
+      display: "9",
+      x: 1272,
+      y: 122,
+      w: 256,
+      h: 256,
+      path: "/data/c/0.jpg.hold",
+      quality: CROP_QUALITY,
+    });
+    expect(await capturer.crop(5000, 5000, 256, "/x")).toBeNull(); // on no display
+  });
+
+  it("usage reads the helper's own CPU ms and RSS", async () => {
+    const children: FakeShots[] = [];
+    const shots = new Shots({
+      spawn: () => {
+        const c = new FakeShots();
+        children.push(c);
+        return c;
+      },
+    });
+    expect(await shots.usage()).toEqual({ cpuMs: 1234.5, rssMb: 41 });
   });
 });

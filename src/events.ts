@@ -85,7 +85,7 @@ export type Event = Base &
   (
     | { kind: "move"; x: number; y: number }
     /** before/after = frame numbers */
-    | {
+    | ({
         kind: "click";
         x: number;
         y: number;
@@ -97,8 +97,9 @@ export type Event = Base &
         out?: Out;
         /** The latest `tree` written before the act. */
         tree?: number;
-      }
-    | {
+      } & Settle &
+        Approach)
+    | ({
         kind: "drag";
         x0: number;
         y0: number;
@@ -111,9 +112,10 @@ export type Event = Base &
         out?: Out;
         /** The latest `tree` written before the act. */
         tree?: number;
-      }
+      } & Settle &
+        Approach)
     /** wheel ticks folded per 250 ms */
-    | {
+    | ({
         kind: "scroll";
         x: number;
         y: number;
@@ -125,9 +127,10 @@ export type Event = Base &
         out?: Out;
         /** The latest `tree` written before the act. */
         tree?: number;
-      }
+      } & Settle &
+        Approach)
     /** printable keys folded, ends at 1 s idle, a click, or a non-text key */
-    | {
+    | ({
         kind: "text";
         text: string;
         redacted: boolean;
@@ -137,9 +140,9 @@ export type Event = Base &
         out?: Out;
         /** The latest `tree` written before the act. */
         tree?: number;
-      }
+      } & Settle)
     /** enter, tab, arrows, esc, backspace runs, and any combo */
-    | {
+    | ({
         kind: "key";
         key: string;
         mods: ("ctrl" | "alt" | "shift" | "meta")[];
@@ -149,7 +152,7 @@ export type Event = Base &
         out?: Out;
         /** The latest `tree` written before the act. */
         tree?: number;
-      }
+      } & Settle)
     /** app or window changed (app/window on Base) */
     | { kind: "focus" }
     /** a screen change with no act (idle reading) */
@@ -180,7 +183,37 @@ export type Event = Base &
     | { kind: "clipboard"; types: string[]; length: number; text?: string; redacted: boolean }
     /** the person's own "why" (Ctrl+Alt+Shift+T); an empty answer is `goal: "", done: true` */
     | { kind: "task"; goal: string; done?: boolean }
+    /**
+     * Quality: one per written frame. `at` is the grab's t (a ring frame can be older than the act
+     * that names it); `x, y` the cursor then (screenshots carry no cursor).
+     */
+    | { kind: "shot"; frame: number; at: number; x: number; y: number; display: string }
+    /** Quality: the capture level from here on, and the input that decided it. */
+    | { kind: "level"; level: Level; why: string }
   );
+
+/**
+ * Quality, on every act: `settle` is ms from the act's end to the screen holding still (two grabs
+ * in a row that do not differ); `settled: false` when 3 s ran out first (a spinner, a video), and
+ * `settle` is then the time it gave up. Neither is there at `lean` (a fixed 300 ms after-frame).
+ */
+export interface Settle {
+  settle?: number;
+  settled?: boolean;
+}
+
+/**
+ * Quality, on click, drag and scroll: `path` is the pointer's raw moves `[dt, x, y]`, dt in ms from
+ * the act's t: the last 1 s before it (dt < 0, at most 60 points), then a drag's own path while
+ * the button was held (dt >= 0, at most 120). `crop` names `crops/<n>.jpg`: 256x256 points around
+ * the pointer at button-down (a scroll: its first tick), at the display's native pixels.
+ */
+export interface Approach {
+  path?: [number, number, number][];
+  crop?: number;
+}
+
+export type Level = "full" | "normal" | "lean";
 
 export type Button = "left" | "right" | "middle";
 export type Mod = "ctrl" | "alt" | "shift" | "meta";
@@ -210,6 +243,34 @@ export interface SessionMeta {
   startedAt: string;
   endedAt: string | null;
   displays: Display[];
+  /** Quality: running totals over the session's closed segments (`Stats` summed). */
+  totals?: Stats;
+}
+
+/**
+ * Quality: `<segment>/stats.json`, written when the segment closes and again when its OCR is done
+ * (or given up, 2 h later). A trainer filters on these. `recovered`: closed by the next start after
+ * a crash, so only what the files show is counted.
+ */
+export interface Stats {
+  /** Events written, by kind. */
+  events: Record<string, number>;
+  /** Raw pointer moves the 20 Hz / 4 px fold dropped. */
+  movesDropped: number;
+  /** Probe asks (at, focused, front, tree) that answered, and that timed out or had no helper. */
+  probe: { answers: number; timeouts: number };
+  /** Acts written with no element. */
+  nullElement: number;
+  frames: { saved: number; failed: number; slotReused: number };
+  trees: number;
+  crops: number;
+  /** Images read; `same`: a frame whose hash matched one already read; `skipped`: not read in time. */
+  ocr: { done: number; same: number; failed: number; skipped: number };
+  /** Seconds at each level. */
+  levels: Record<Level, number>;
+  /** Helper (re)starts after the first, by helper. */
+  restarts: Record<string, number>;
+  recovered?: boolean;
 }
 
 export type Raw =
@@ -229,7 +290,9 @@ export type Act =
   | { kind: "key"; t: number; key: string; mods: Mod[] };
 
 /** Where an act's context comes from: the point under the pointer, or the focused element. */
-export type Begin = { on: "point"; x: number; y: number } | { on: "focus" };
+export type Begin =
+  /** `press`: a button went down (a click or a drag); otherwise a scroll's first tick. */
+  { on: "point"; x: number; y: number; press?: boolean } | { on: "focus" };
 
 /** An act as it leaves the folder: `ctx` came from `begin` when it started, `end` is when it closed. */
 export type Folded<C> = Act & { end: number; ctx?: C };
@@ -263,6 +326,8 @@ export class Folder<C> {
   private scroll: { t: number; x: number; y: number; dx: number; dy: number; ctx: C } | null = null;
   private scrollLast = 0;
   private text: { t: number; last: number; text: string; ctx: C } | null = null;
+  /** Raw moves the 20 Hz / 4 px rule dropped (stats). */
+  movesDropped = 0;
 
   private readonly begin: (b: Begin, t: number) => C;
   private readonly emit: (a: Folded<C>) => void;
@@ -286,7 +351,7 @@ export class Folder<C> {
           x: r.x,
           y: r.y,
           button: r.button,
-          ctx: this.begin({ on: "point", x: r.x, y: r.y }, r.t),
+          ctx: this.begin({ on: "point", x: r.x, y: r.y, press: true }, r.t),
         };
         this.drain();
         return;
@@ -329,7 +394,10 @@ export class Folder<C> {
 
   private move(t: number, x: number, y: number): void {
     const m = this.lastMove;
-    if (m && (t - m.t < MOVE_MS || Math.hypot(x - m.x, y - m.y) < MOVE_PX)) return;
+    if (m && (t - m.t < MOVE_MS || Math.hypot(x - m.x, y - m.y) < MOVE_PX)) {
+      this.movesDropped++;
+      return;
+    }
     this.lastMove = { t, x, y };
     this.queue.push({ kind: "move", t, x, y, end: t });
     this.drain();

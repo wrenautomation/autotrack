@@ -9,7 +9,7 @@
 import type { Screen as CoordScreen } from "./coords.ts";
 import type { Display } from "./events.ts";
 import { HelperClient, helperCommand, spawnHelper } from "./helper.ts";
-import type { Capturer, Shot } from "./screen.ts";
+import type { Capturer, CropAnswer, Shot } from "./screen.ts";
 
 /** JPEG quality of every frame. */
 export const QUALITY = 70;
@@ -38,6 +38,15 @@ export interface SaveAnswer {
   error?: string;
 }
 
+export interface CropReply extends SaveAnswer {
+  /** Pixels written. */
+  w?: number;
+  h?: number;
+}
+
+/** JPEG quality of a crop (small text has to stay readable). */
+export const CROP_QUALITY = 85;
+
 export class Shots extends HelperClient {
   private readonly grabMs: number;
   private readonly saveMs: number;
@@ -62,6 +71,14 @@ export class Shots extends HelperClient {
   save(slot: number, seq: number | undefined, path: string): Promise<SaveAnswer | null> {
     const args = { slot, ...(seq !== undefined ? { seq } : {}), path, quality: QUALITY };
     return this.call("save", args, this.saveMs);
+  }
+  /** A rect of a display, in global logical points, at its native pixels. */
+  crop(
+    display: string,
+    rect: { x: number; y: number; w: number; h: number },
+    path: string,
+  ): Promise<CropReply | null> {
+    return this.call("crop", { display, ...rect, path, quality: CROP_QUALITY }, this.saveMs);
   }
 }
 
@@ -144,15 +161,32 @@ export class ShotsCapturer implements Capturer {
     };
   }
 
-  async save(shot: Shot, path: string): Promise<boolean> {
+  async save(shot: Shot, path: string): Promise<boolean | "reused"> {
     const t = shot.token as Token;
     if (t.start !== this.shots.starts) return false; // the helper restarted: its slots are gone
     const a = await this.shots.save(t.slot, t.seq, path);
+    if (a?.error === "slot reused") return "reused";
     if (!a?.ok) {
       this.note(a?.error ?? "no answer");
       return false;
     }
     return true;
+  }
+
+  /**
+   * `size` × `size` points centred on a logical point, moved inside its display, at the display's
+   * native pixels.
+   */
+  async crop(x: number, y: number, size: number, path: string): Promise<CropAnswer | null> {
+    const d = this.at(x, y);
+    if (!d) return null;
+    const rect = cropRect(d, x, y, size);
+    const a = await this.shots.crop(d.id, rect, path);
+    if (!a?.ok) {
+      this.note(a?.error ?? "no answer");
+      return null;
+    }
+    return { ok: true, ...(a.w ? { w: a.w } : {}), ...(a.h ? { h: a.h } : {}) };
   }
 
   /** Log a failure once per distinct message, not every 500 ms. */
@@ -161,6 +195,24 @@ export class ShotsCapturer implements Capturer {
     this.lastError = error;
     this.log?.(`screen: ${error}`);
   }
+}
+
+/** The crop rect for a point: `size` points square (smaller on a tinier display), inside it. */
+export function cropRect(
+  d: Pick<Display, "x" | "y" | "width" | "height">,
+  x: number,
+  y: number,
+  size: number,
+): { x: number; y: number; w: number; h: number } {
+  const w = Math.min(size, Math.floor(d.width));
+  const h = Math.min(size, Math.floor(d.height));
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+  return {
+    x: Math.round(clamp(x - w / 2, d.x, d.x + d.width - w)),
+    y: Math.round(clamp(y - h / 2, d.y, d.y + d.height - h)),
+    w,
+    h,
+  };
 }
 
 export interface FramesCheck {

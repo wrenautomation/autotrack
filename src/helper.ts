@@ -35,13 +35,13 @@ export interface HelperOptions {
 
 export const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/** The helper for this OS (`--shots` mode when asked), or null when it is not there. */
+/** The helper for this OS (`--shots` / `--ocr` mode when asked), or null when it is not there. */
 export function helperCommand(
   platform: NodeJS.Platform = process.platform,
   root = PACKAGE_ROOT,
-  mode: "probe" | "shots" = "probe",
+  mode: "probe" | "shots" | "ocr" = "probe",
 ): { cmd: string; args: string[]; path: string } | null {
-  const extra = mode === "shots" ? ["--shots"] : [];
+  const extra = mode === "probe" ? [] : [`--${mode}`];
   if (platform === "darwin") {
     const path = join(root, "helpers", "mac", "probe");
     return existsSync(path) ? { cmd: path, args: extra, path } : null;
@@ -60,6 +60,11 @@ export function spawnHelper(cmd: { cmd: string; args: string[] }): () => HelperC
       stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true,
     }) as HelperChild;
+}
+
+export interface Usage {
+  cpuMs: number;
+  rssMb: number;
 }
 
 type Pending = { resolve: (v: unknown) => void; timer: NodeJS.Timeout };
@@ -115,6 +120,13 @@ export class HelperClient {
         this.settle(id, null);
       }
     });
+  }
+
+  /** The helper process's own cost: cumulative CPU ms and resident MB (null: no answer). */
+  async usage(timeoutMs = 2000): Promise<Usage | null> {
+    const a = await this.call<Partial<Usage>>("usage", {}, timeoutMs);
+    if (typeof a?.cpuMs !== "number" || typeof a.rssMb !== "number") return null;
+    return { cpuMs: a.cpuMs, rssMb: a.rssMb };
   }
 
   close(): void {

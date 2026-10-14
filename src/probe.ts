@@ -104,6 +104,10 @@ export class Probe extends HelperClient {
   perm(timeoutMs = 2000): Promise<PermAnswer | null> {
     return this.call("perm", {}, timeoutMs);
   }
+  /** Windows: `GetSystemPowerStatus` as `{ac, battery}` (null when unknown). */
+  power(timeoutMs = 2000): Promise<{ ac: boolean | null; battery: number | null } | null> {
+    return this.call("power", {}, timeoutMs);
+  }
   tree(timeoutMs = 3000): Promise<TreeAnswer | null> {
     return this.call(
       "tree",

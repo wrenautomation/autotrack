@@ -9,6 +9,7 @@ import {
   capFrames,
   countSegments,
   DirShipper,
+  finishWaiting,
   type ObjectStore,
   PutError,
   s3Store,
@@ -226,7 +227,63 @@ describe("DirShipper", () => {
   });
 });
 
+describe("quality files", () => {
+  it("puts crops, OCR gzipped and stats.json before events", async () => {
+    const dir = session("20261013T100000-abcd", [{ events: 1, frames: [0], done: true }]);
+    const seg = join(dir, "000");
+    mkdirSync(join(seg, "crops"));
+    writeFileSync(join(seg, "crops", "3.jpg"), "c");
+    writeFileSync(join(seg, "crops", "4.jpg.hold"), "held");
+    mkdirSync(join(seg, "ocr"));
+    writeFileSync(join(seg, "ocr", "0.json"), '{"lines":[]}');
+    writeFileSync(join(seg, "ocr", "c3.json"), '{"same":0}');
+    writeFileSync(join(seg, "stats.json"), '{"segment":"000"}');
+    const m = memStore();
+    await shipper(m.store).ship(sessions);
+    expect(m.puts.map((p) => [p.key.split("/").slice(2).join("/"), p.type])).toEqual([
+      ["session.json", "application/json"],
+      ["000/frames/0.jpg", "image/jpeg"],
+      ["000/crops/3.jpg", "image/jpeg"],
+      ["000/ocr/0.json.gz", "application/gzip"],
+      ["000/ocr/c3.json.gz", "application/gzip"],
+      ["000/stats.json", "application/json"],
+      ["000/events.jsonl.gz", "application/gzip"],
+    ]);
+    expect(gunzipSync(m.puts[4]?.body ?? Buffer.alloc(0)).toString()).toBe('{"same":0}');
+  });
+
+  it("with no recorder running, segments waiting for OCR are finished and ship", async () => {
+    const dir = session("20261013T100000-abcd", [{ events: 1, frames: [0, 1], done: false }]);
+    const seg = join(dir, "000");
+    writeFileSync(join(seg, "stats.json"), JSON.stringify({ segment: "000", ocr: {} }));
+    session("20261013T110000-open", [{ events: 1, frames: [], done: false }]); // still being written
+    expect(finishWaiting(sessions)).toBe(1);
+    expect(existsSync(join(seg, ".done"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(seg, "stats.json"), "utf8")).ocr).toEqual({
+      done: 0,
+      same: 0,
+      failed: 0,
+      skipped: 2,
+    });
+    rmSync(join(seg, ".done"));
+    const m = memStore();
+    await shipper(m.store).ship(sessions, { force: true, finish: true });
+    expect(m.puts.some((p) => p.key.endsWith("000/events.jsonl.gz"))).toBe(true);
+    expect(countSegments(sessions)).toEqual({ open: 1, closed: 0 });
+  });
+});
+
 describe("capFrames", () => {
+  it("crops go with frames, oldest segment first", () => {
+    const a = session("20261013T100000-aaaa", [
+      { events: 1, frames: [0], done: true, frameBytes: 1000 },
+    ]);
+    mkdirSync(join(a, "000", "crops"));
+    writeFileSync(join(a, "000", "crops", "0.jpg"), Buffer.alloc(1000));
+    expect(capFrames(sessions, 500)).toBe(2);
+    expect(existsSync(join(a, "000", "crops", "0.jpg"))).toBe(false);
+  });
+
   it("deletes the oldest frames first and never events", () => {
     const a = session("20261013T100000-aaaa", [
       { events: 50, frames: [0, 1], done: true, frameBytes: 1000 },

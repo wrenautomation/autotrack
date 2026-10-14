@@ -3,14 +3,17 @@
  *
  *   <device>/<session>/session.json                  (put again whenever it changes, e.g. endedAt)
  *   <device>/<session>/<segment>/frames/<n>.jpg      (each deleted locally once put)
+ *   <device>/<session>/<segment>/crops/<n>.jpg       (native crops at acts; deleted once put)
  *   <device>/<session>/<segment>/trees/<n>.json.gz   (accessibility trees, `.txt.gz` for a web
  *                                                     snapshot; each deleted locally once put)
+ *   <device>/<session>/<segment>/ocr/<n>.json.gz     (OCR of frame n; `c<n>.json.gz` of crop n)
+ *   <device>/<session>/<segment>/stats.json          (the segment's integrity stats)
  *   <device>/<session>/<segment>/events.jsonl.gz     (put last: the segment counts once it lands)
  *
  * A segment is taken only once `.done` is in it, and deleted locally after its events land. A
  * failed put stops the pass (most often: offline); the next pass waits 5, 10, 20, … 60 minutes.
- * Past `maxLocalGb` the oldest frames are deleted, never events. The secret is only ever used to
- * sign; nothing here logs a header.
+ * Past `maxLocalGb` the oldest frames and crops are deleted, never events. The secret is only ever
+ * used to sign; nothing here logs a header.
  */
 import { createHash } from "node:crypto";
 import {
@@ -25,6 +28,7 @@ import {
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import type { Config, TrackCode } from "./config.ts";
+import { finishSegment, readStats } from "./journal.ts";
 import { sha256Hex, sign } from "./sigv4.ts";
 
 export interface ShipResult {
@@ -141,8 +145,8 @@ const dirs = (dir: string) =>
         .map((e) => e.name)
         .sort()
     : [];
-const framesIn = (segDir: string) => {
-  const dir = join(segDir, "frames");
+const framesIn = (segDir: string, sub = "frames") => {
+  const dir = join(segDir, sub);
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
     .map((name) => ({ name, n: frameNo(name) }))
@@ -157,6 +161,31 @@ const treesIn = (segDir: string) => {
     .filter((name) => /^\d+\.(json|txt)$/.test(name))
     .sort((a, b) => Number.parseInt(a, 10) - Number.parseInt(b, 10));
 };
+
+const ocrIn = (segDir: string) => {
+  const dir = join(segDir, "ocr");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => /^c?\d+\.json$/.test(name))
+    .sort();
+};
+
+/**
+ * Segments closed but still waiting for OCR (`stats.json`, no `.done`) get `.done` now, their
+ * unread images counted as skipped: for `autotrack ship` and uninstall with no recorder running,
+ * so nothing is stranded.
+ */
+export function finishWaiting(sessions: string): number {
+  let n = 0;
+  for (const s of dirs(sessions))
+    for (const seg of dirs(join(sessions, s)).filter(isSegment)) {
+      const sd = join(sessions, s, seg);
+      if (existsSync(join(sd, ".done")) || !readStats(sd)) continue;
+      finishSegment(sd);
+      n++;
+    }
+  return n;
+}
 
 /** Bytes under a dir. */
 export function dirBytes(dir: string): number {
@@ -185,8 +214,8 @@ export function countSegments(sessions: string): { open: number; closed: number 
 }
 
 /**
- * Delete the oldest frames (session, then segment, then frame number) until the sessions dir is
- * under `maxBytes`. Events are never touched. Returns how many frames went.
+ * Delete the oldest frames and crops (session, then segment, then number) until the sessions dir
+ * is under `maxBytes`. Events are never touched. Returns how many images went.
  */
 export function capFrames(sessions: string, maxBytes: number): number {
   let total = dirBytes(sessions);
@@ -194,9 +223,12 @@ export function capFrames(sessions: string, maxBytes: number): number {
   let dropped = 0;
   for (const s of dirs(sessions))
     for (const seg of dirs(join(sessions, s)).filter(isSegment))
-      for (const { name } of framesIn(join(sessions, s, seg))) {
+      for (const [sub, { name }] of [
+        ...framesIn(join(sessions, s, seg)).map((f) => ["frames", f] as const),
+        ...framesIn(join(sessions, s, seg), "crops").map((f) => ["crops", f] as const),
+      ]) {
         if (total <= maxBytes) return dropped;
-        const p = join(sessions, s, seg, "frames", name);
+        const p = join(sessions, s, seg, sub, name);
         try {
           const size = statSync(p).size;
           unlinkSync(p);
@@ -274,11 +306,18 @@ export class DirShipper implements Shipper {
     this.sleep = o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
-  /** `force` ignores the backoff (`autotrack ship`). */
-  async ship(sessions: string, opts: { force?: boolean } = {}): Promise<ShipResult> {
+  /**
+   * `force` ignores the backoff (`autotrack ship`). `finish`: no recorder is running, so segments
+   * waiting for OCR are finished first (see `finishWaiting`).
+   */
+  async ship(
+    sessions: string,
+    opts: { force?: boolean; finish?: boolean } = {},
+  ): Promise<ShipResult> {
     const release = this.o.lockPath ? takeLock(this.o.lockPath) : () => {};
     if (!release) return { put: 0, failed: countSegments(sessions).closed, skipped: "busy" };
     try {
+      if (opts.finish) finishWaiting(sessions);
       const r = await this.upload(sessions, opts.force ?? false);
       const dropped = capFrames(sessions, this.o.maxLocalGb * 1e9);
       if (dropped)
@@ -368,9 +407,19 @@ export class DirShipper implements Shipper {
         key: `${prefix}/frames/${f.n}.jpg`,
         gzip: false,
       })),
+      ...framesIn(segDir, "crops").map((f) => ({
+        path: join(segDir, "crops", f.name),
+        key: `${prefix}/crops/${f.n}.jpg`,
+        gzip: false,
+      })),
       ...treesIn(segDir).map((name) => ({
         path: join(segDir, "trees", name),
         key: `${prefix}/trees/${name}.gz`,
+        gzip: true,
+      })),
+      ...ocrIn(segDir).map((name) => ({
+        path: join(segDir, "ocr", name),
+        key: `${prefix}/ocr/${name}.gz`,
         gzip: true,
       })),
     ];
@@ -390,6 +439,9 @@ export class DirShipper implements Shipper {
       }
     };
     await Promise.all(Array.from({ length: this.o.concurrency ?? 4 }, worker));
+    const stats = join(segDir, "stats.json");
+    if (existsSync(stats))
+      await put(`${prefix}/stats.json`, readFileSync(stats), "application/json");
     const ev = join(segDir, "events.jsonl");
     const events = existsSync(ev) ? readFileSync(ev) : Buffer.alloc(0);
     await put(`${prefix}/events.jsonl.gz`, gzipSync(events), "application/gzip");

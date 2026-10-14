@@ -13,6 +13,11 @@
  * frames) turn into loud `::warning::` lines when named in --soft, never silent passes.
  * --mac: macOS secure input hides keystrokes in a password box from every event tap, so a missing
  * redacted run there is a warning, not a failure (the leak check stays hard).
+ * Quality: a `level` event, `stats.json` in every segment and totals in session.json (hard); with
+ * the screen: `shot` events for frames, a click whose before frame was grabbed at button-down, an act
+ * with a settled after frame and `settle`, a click with an approach `path`, a crop at native pixels
+ * (`--crop-px <n>`: 256 points times the display's native pixels per point) and OCR that read the
+ * known text ("hello" or "Submit").
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -29,6 +34,7 @@ const opt = (name) => {
 const dir = opt("--dir");
 const soft = new Set((opt("--soft") ?? "").split(",").filter(Boolean));
 const mac = args.includes("--mac");
+const cropPx = opt("--crop-px") ? Number(opt("--crop-px")) : null;
 if (!dir) {
   console.error(
     "usage: check.mjs --dir <stub root>/<bucket>/<device> [--soft input,screen] [--mac]",
@@ -91,6 +97,11 @@ const events = [];
 const trees = new Map(); // "<session>/<n>" → parsed tree
 let frames = 0;
 let raw = "";
+const crops = new Map(); // "<session>/<seg>/<n>" → {width, height}
+const ocr = new Map(); // "<session>/<seg>/<name>" → parsed
+let statsFiles = 0;
+let segCount = 0;
+let totals = 0;
 for (const s of sessions) {
   const sdir = join(dir, s);
   const metaPath = join(sdir, "session.json");
@@ -107,6 +118,7 @@ for (const s of sessions) {
       typeof meta.endedAt === "string" && meta.endedAt.length > 0,
       `${s}: endedAt ${meta.endedAt}`,
     );
+  if (meta?.totals) totals++;
 
   const segs = files(sdir).filter((g) => isDir(join(sdir, g)));
   let lastT = -Infinity;
@@ -150,6 +162,34 @@ for (const s of sessions) {
         trees.set(`${s}/${g}/${m[1]}`, m[2] === "json" ? JSON.parse(text) : text);
       } catch (e) {
         fail(`${s}/${g}/trees/${f}: not gzip ${m[2]} (${e.message})`);
+      }
+    }
+    segCount++;
+    try {
+      const st = JSON.parse(readFileSync(join(sdir, g, "stats.json"), "utf8"));
+      statsFiles++;
+      console.log(`      stats ${s}/${g}: ${JSON.stringify(st)}`);
+    } catch (e) {
+      fail(`${s}/${g}/stats.json missing or bad (${e.message})`);
+    }
+    for (const f of files(join(sdir, g, "crops"))) {
+      const b = readFileSync(join(sdir, g, "crops", f));
+      const size = b[0] === 0xff && b[1] === 0xd8 ? jpegSize(b) : null;
+      if (!size || !/^\d+\.jpg$/.test(f)) fail(`${s}/${g}/crops/${f}: want <n>.jpg, a JPEG`);
+      else crops.set(`${s}/${g}/${Number.parseInt(f, 10)}`, size);
+    }
+    for (const f of files(join(sdir, g, "ocr"))) {
+      const m = /^(c?\d+)\.json\.gz$/.exec(f);
+      if (!m) {
+        fail(`${s}/${g}/ocr/${f}: want <n>.json.gz or c<n>.json.gz`);
+        continue;
+      }
+      try {
+        const text = gunzipSync(readFileSync(join(sdir, g, "ocr", f))).toString("utf8");
+        raw += text;
+        ocr.set(`${s}/${g}/${m[1]}`, JSON.parse(text));
+      } catch (e) {
+        fail(`${s}/${g}/ocr/${f}: not gzip JSON (${e.message})`);
       }
     }
     for (const f of files(join(sdir, g, "frames"))) {
@@ -256,8 +296,106 @@ else if (mac)
   );
 else check(false, "a redacted text run for the password box", "input");
 
+// Quality: captured at the moment, enriched in idle time.
+const levels = events.filter((e) => e.kind === "level");
+for (const l of levels) console.log(`      level ${l.level} (${l.why}) at ${l.t}`);
+check(
+  levels.length > 0 && levels.every((l) => ["full", "normal", "lean"].includes(l.level) && l.why),
+  `${levels.length} level event(s), each with a why`,
+);
+check(
+  segCount > 0 && statsFiles === segCount,
+  `stats.json in every segment (${statsFiles}/${segCount})`,
+);
+check(totals === sessions.length, `session.json carries totals (${totals}/${sessions.length})`);
+
+const shots = new Map(); // "<session>/<seg>/<frame>" → shot event
+for (const e of events.filter((e) => e.kind === "shot")) shots.set(`${e.seg}/${e.frame}`, e);
+const shotShaped = [...shots.values()].filter(
+  (e) => [e.at, e.x, e.y].every((v) => typeof v === "number") && typeof e.display === "string",
+);
+check(
+  shots.size > 0 && shotShaped.length === shots.size && shots.size >= frames,
+  `${shots.size} shot event(s) for ${frames} frame(s), each with at, x, y, display`,
+  "screen",
+);
+
+const withBefore = clicks.filter((c) => typeof c.before === "number");
+const fresh = withBefore.filter((c) => {
+  const sh = shots.get(`${c.seg}/${c.before}`);
+  return sh && sh.at >= c.t - 20 && sh.at <= c.t + 1500;
+});
+for (const c of withBefore)
+  console.log(
+    `      click t ${c.t} before ${c.before} grabbed at ${shots.get(`${c.seg}/${c.before}`)?.at ?? "?"}`,
+  );
+check(
+  fresh.length > 0,
+  `a click's before frame was grabbed at button-down (${fresh.length}/${withBefore.length} fresh)`,
+  "screen",
+);
+
+const settledActs = acts.filter(
+  (e) => typeof e.after === "number" && typeof e.settle === "number" && e.settled !== false,
+);
+for (const e of acts.filter((e) => "settle" in e))
+  console.log(
+    `      ${e.kind} settle ${e.settle} ms${e.settled === false ? " (not settled)" : ""}`,
+  );
+check(
+  settledActs.length > 0,
+  `${settledActs.length} act(s) with a settled after frame and settle`,
+  "screen",
+);
+
+const pathed = acts.filter(
+  (e) =>
+    Array.isArray(e.path) &&
+    e.path.length > 0 &&
+    e.path.every((p) => Array.isArray(p) && p.length === 3 && p.every(Number.isFinite)),
+);
+check(
+  clicks.some((c) => pathed.includes(c)) && pathed.every((e) => e.path.length <= 180),
+  `${pathed.length} act(s) with a path [[dt, x, y]], a click among them`,
+  "input",
+);
+
+const cropped = acts.filter((e) => typeof e.crop === "number");
+for (const e of cropped) {
+  const size = crops.get(`${e.seg}/${e.crop}`);
+  console.log(
+    `      ${e.kind} crop ${e.crop}: ${size ? `${size.width}x${size.height}` : "missing"}`,
+  );
+}
+const nativeCrops = cropped.filter((e) => {
+  const size = crops.get(`${e.seg}/${e.crop}`);
+  if (!size || size.width !== size.height || size.width < 256) return false;
+  return cropPx === null || Math.abs(size.width - cropPx) <= 1;
+});
+check(
+  nativeCrops.length > 0 && cropped.every((e) => crops.has(`${e.seg}/${e.crop}`)),
+  `${nativeCrops.length} crop(s) at native size (${cropPx ?? "≥ 256"} px square), each stored`,
+  "screen",
+);
+
+const readOcr = [...ocr.entries()].filter(([, o]) => Array.isArray(o.lines));
+const knownText = readOcr.filter(([, o]) => o.lines.some((l) => /hello|submit/i.test(l.text)));
+console.log(
+  `      ocr: ${ocr.size} file(s), ${readOcr.length} read; known text in ${knownText.map(([k]) => k).join(", ") || "none"}`,
+);
+check(
+  readOcr.every(([, o]) =>
+    o.lines.every((l) => typeof l.text === "string" && [l.x, l.y, l.w, l.h].every(Number.isFinite)),
+  ),
+  "every OCR line has text and a box",
+);
+check(knownText.length > 0, `OCR read the known text ("hello" or "Submit")`, "screen");
+
 // Never soft: whatever was or wasn't captured, the password must not be anywhere.
-check(!raw.includes(PASSWORD), "the typed password appears nowhere in events or session.json");
+check(
+  !raw.includes(PASSWORD),
+  "the typed password appears nowhere in events, session.json, trees or OCR",
+);
 
 console.log(failures ? `${failures} failure(s)` : "e2e checks passed");
 process.exit(failures ? 1 : 0);

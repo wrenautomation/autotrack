@@ -25,12 +25,15 @@ import { type Config, dataDir, loadConfig, sessionsDir } from "./config.ts";
 import { type Command, lock, type Request, runningPid, send, serve } from "./control.ts";
 import { type Coords, coordsFor } from "./coords.ts";
 import { startHook, uiohook } from "./hook.ts";
+import { pinnedLevel } from "./level.ts";
 import { notify } from "./notify.ts";
+import { ocrHelper } from "./ocr.ts";
 import { helperCommand, openProbe, PACKAGE_ROOT } from "./probe.ts";
 import { ask } from "./prompt.ts";
 import { Recorder, type Status } from "./recorder.ts";
 import { noShipper, type Shipper, shipperFor } from "./ship.ts";
 import { syntheticHook, syntheticRate } from "./synthetic.ts";
+import { busyMeter, macPower, powerOf } from "./system.ts";
 import { removeLaterWin, uninstall } from "./uninstall.ts";
 
 const VERSION = (() => {
@@ -67,7 +70,7 @@ function logger(data: string): (msg: string) => void {
 async function openRecorder(
   data: string,
   config: Config,
-  opts: { notify: boolean; shipper: Shipper; log: (msg: string) => void },
+  opts: { notify: boolean; shipper: Shipper; log: (msg: string) => void; ocr?: boolean },
 ): Promise<Recorder> {
   const probe = openProbe(opts.log);
   if (!probe.available)
@@ -108,6 +111,18 @@ async function openRecorder(
     ...(opts.notify ? { notify: (m: string) => notify(m), ask } : {}),
     shipper: opts.shipper,
     log: opts.log,
+    power:
+      process.platform === "darwin"
+        ? macPower
+        : async () => (probe.available ? powerOf(await probe.power()) : null),
+    busy: busyMeter(process.platform),
+    helperUsage: async () => {
+      const [p, s] = await Promise.all([probe.usage(), shots.usage()]);
+      return { probe: p, shots: s };
+    },
+    helperStarts: () => ({ probe: probe.starts, shots: shots.starts }),
+    pinned: pinnedLevel(process.env.AUTOTRACK_LEVEL),
+    ocr: opts.ocr === false ? null : ocrHelper(opts.log),
   });
   return recorder;
 }
@@ -157,7 +172,7 @@ async function start(data: string): Promise<number> {
       setImmediate(() => void stop());
       return { stopping: true };
     }
-    return recorder.status();
+    return recorder.statusNow();
   });
   server.ref();
   process.on("SIGINT", () => void stop());
@@ -201,17 +216,53 @@ function countSegments(sessions: string): { open: number; closed: number } {
 
 const MEASURE_MS = 10_000;
 
-/** CPU % of one core and RSS over 10 s: the running recorder's, or a throwaway one in-process. */
-async function measure(data: string): Promise<{ cpuPct: number; rssMb: number; of: string }> {
+interface Cost {
+  level: string;
+  why: string;
+  /** % of one core over the window, recorder + helpers (OCR apart). */
+  cpuPct: number;
+  /** Resident MB, recorder + helpers. */
+  rssMb: number;
+  parts: Record<string, { cpuPct: number; rssMb: number }>;
+  ocrCpuMs: number;
+  of: string;
+}
+
+/** Cost between two statuses `ms` apart. */
+function costOf(a: Status, b: Status, ms: number, of: string): Cost {
+  const parts: Cost["parts"] = {
+    recorder: { cpuPct: ((b.cpuUs - a.cpuUs) / 1000 / ms) * 100, rssMb: b.rssMb },
+  };
+  for (const [k, u] of Object.entries(b.helpers ?? {})) {
+    const u0 = a.helpers?.[k];
+    if (!u || !u0) continue;
+    parts[k] = { cpuPct: (Math.max(0, u.cpuMs - u0.cpuMs) / ms) * 100, rssMb: u.rssMb };
+  }
+  const sum = (f: (p: { cpuPct: number; rssMb: number }) => number) =>
+    Object.values(parts).reduce((n, p) => n + f(p), 0);
+  return {
+    level: b.level,
+    why: b.why,
+    cpuPct: sum((p) => p.cpuPct),
+    rssMb: Math.round(sum((p) => p.rssMb)),
+    parts,
+    ocrCpuMs: b.ocr?.cpuMs ?? 0,
+    of,
+  };
+}
+
+/**
+ * CPU % of one core and RSS over 10 s, recorder and helpers: the running recorder's, or a
+ * throwaway one in-process.
+ */
+async function measure(data: string): Promise<Cost> {
   const first = (await send(data, "status")) as Status | null;
   if (first?.pid) {
     const t = Date.now();
     await new Promise((r) => setTimeout(r, MEASURE_MS));
     const second = (await send(data, "status")) as Status | null;
-    if (second?.pid === first.pid) {
-      const cpuPct = ((second.cpuUs - first.cpuUs) / 1000 / (Date.now() - t)) * 100;
-      return { cpuPct, rssMb: second.rssMb, of: `running recorder (pid ${first.pid})` };
-    }
+    if (second?.pid === first.pid)
+      return costOf(first, second, Date.now() - t, `running recorder (pid ${first.pid})`);
   }
   const tmp = mkdtempSync(join(tmpdir(), "autotrack-doctor-"));
   const quiet = () => {};
@@ -219,24 +270,26 @@ async function measure(data: string): Promise<{ cpuPct: number; rssMb: number; o
     notify: false,
     shipper: noShipper,
     log: quiet,
+    ocr: false,
   });
-  const cpu0 = process.cpuUsage();
+  recorder.start();
+  const a = await recorder.statusNow();
   const t = Date.now();
   let rss = 0;
-  recorder.start();
   const sample = setInterval(() => {
     rss = Math.max(rss, process.memoryUsage().rss);
   }, 500);
   await new Promise((r) => setTimeout(r, MEASURE_MS));
   clearInterval(sample);
+  const b = await recorder.statusNow();
   await recorder.stop();
-  const used = process.cpuUsage(cpu0);
   rmSync(tmp, { recursive: true, force: true });
-  return {
-    cpuPct: ((used.user + used.system) / 1000 / (Date.now() - t)) * 100,
-    rssMb: Math.round(rss / 1e6),
-    of: "a throwaway recorder in this process (move the mouse and type to measure active use)",
-  };
+  return costOf(
+    a,
+    { ...b, rssMb: Math.max(b.rssMb, Math.round(rss / 1e6)) },
+    Date.now() - t,
+    "a throwaway recorder in this process (move the mouse and type to measure active use)",
+  );
 }
 
 async function doctor(data: string): Promise<number> {
@@ -296,8 +349,17 @@ async function doctor(data: string): Promise<number> {
   );
   console.log(`     measuring for ${MEASURE_MS / 1000} s…`);
   const m = await measure(data);
-  line(m.cpuPct < 3, `CPU ${m.cpuPct.toFixed(2)}% of one core (budget 3%), ${m.of}`);
-  line(m.rssMb < 200, `RSS ${m.rssMb} MB (budget 200 MB)`);
+  const each = (f: (p: { cpuPct: number; rssMb: number }) => string) =>
+    Object.entries(m.parts)
+      .map(([k, p]) => `${k} ${f(p)}`)
+      .join(", ");
+  console.log(`     level ${m.level} (${m.why})`);
+  line(
+    m.cpuPct < 3,
+    `CPU ${m.cpuPct.toFixed(2)}% of one core (budget 3%): ${each((p) => `${p.cpuPct.toFixed(2)}%`)}; ${m.of}`,
+  );
+  line(m.rssMb < 200, `RSS ${m.rssMb} MB (budget 200 MB): ${each((p) => `${p.rssMb} MB`)}`);
+  console.log(`     OCR (idle time only, not in the budget): ${m.ocrCpuMs} ms CPU this run`);
   console.log(warnings ? `${warnings} warning(s)` : "all good");
   return warnings ? 1 : 0;
 }
@@ -306,7 +368,8 @@ async function doctor(data: string): Promise<number> {
 async function shipNow(data: string): Promise<number> {
   const config = loadConfig(data, (m) => console.error(m));
   const log = (m: string) => console.error(m);
-  const r = await shipperFor(data, config, log).ship(sessionsDir(data), { force: true });
+  const finish = !runningPid(data); // no recorder: segments waiting for OCR ship as they are
+  const r = await shipperFor(data, config, log).ship(sessionsDir(data), { force: true, finish });
   console.log(JSON.stringify(r, null, 2));
   if (r.skipped === "no code") console.error("no install code in config.json: nothing ships");
   if (r.skipped === "busy") console.error("the recorder is shipping right now; try again shortly");
@@ -360,7 +423,7 @@ async function uninstallCmd(data: string, args: string[]): Promise<number> {
     ship: async () => {
       const config = loadConfig(data);
       return config.ship
-        ? shipperFor(data, config, log).ship(sessionsDir(data), { force: true })
+        ? shipperFor(data, config, log).ship(sessionsDir(data), { force: true, finish: true })
         : null;
     },
     removeLater: removeLaterWin,

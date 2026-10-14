@@ -1,7 +1,8 @@
 # Windows probe test: starts probe.ps1, opens its own text box window (test-form.ps1), checks perm,
 # front, focused, at on the text box, bad input, `at` latency over 50 requests, the form's tree, a
-# message box as front.dialog, and pushed clipboard events. Then starts `probe.ps1 --shots` and checks
-# displays, grab, save (JPEG, at most 1920 px), the ring and timing. Exits 1 and prints every failure.
+# message box as front.dialog, pushed clipboard events, usage and power. Then starts `probe.ps1 --shots`
+# and checks displays, grab, save (JPEG, at most 1920 px), crop (native pixels), usage, the ring and
+# timing; then `probe.ps1 --ocr` on test/fixtures/ocr-text.jpg (known text). Exits 1 and prints every failure.
 # Run: powershell -NoProfile -ExecutionPolicy Bypass -File test.ps1   (Windows PowerShell 5.1)
 $ErrorActionPreference = 'Stop'
 $failures = New-Object System.Collections.ArrayList
@@ -251,6 +252,13 @@ try {
     Check ($hidden.Count -ge 1 -and $null -eq $hidden[0].PSObject.Properties['text'] -and $hidden[0].length -eq 17) 'an excluded copy did not push a text-less concealed event'
     Check (-not $all.ToString().Contains('hunter2')) 'excluded clipboard text came back'
 
+    $u = Ask @{ op = 'usage' }
+    Check ($u.cpuMs -gt 0 -and $u.rssMb -gt 0) "probe usage: $($u | ConvertTo-Json -Compress)"
+    $pw = Ask @{ op = 'power' }
+    Write-Host ('power: ' + ($pw | ConvertTo-Json -Compress))
+    Check ($null -ne $pw.PSObject.Properties['ac'] -and $null -ne $pw.PSObject.Properties['battery']) 'power answers ac and battery'
+    Check ($null -eq $pw.ac -or $pw.ac -is [bool]) 'power ac is a bool or null'
+
     # the typed text must never come back
     Check (-not $all.ToString().Contains($secret)) 'an answer contained the typed text'
 }
@@ -344,6 +352,25 @@ try {
     Check ($stale.ok -eq $false) 'save of a slot reused by a newer grab must be refused'
     Check (-not (Test-Path (Join-Path $env:TEMP 'autotrack-stale.jpg'))) 'a refused save must write nothing'
 
+    # crop: 256 points around a point at physical pixels (256 x DPI), atomic
+    $cropOut = Join-Path $env:TEMP ("autotrack-crop-{0}.jpg.hold" -f $PID)
+    $c = Ask-Shots @{ op = 'crop'; display = $main.id; x = $main.x + 10; y = $main.y + 10; w = 256; h = 256; path = $cropOut; quality = 85 }
+    Write-Host ('crop: ' + ($c | ConvertTo-Json -Compress))
+    Check ($c.ok -eq $true -and $c.bytes -gt 100) "crop: $($c | ConvertTo-Json -Compress)"
+    $px = [math]::Round(256 * $main.os.scale)
+    Check ($c.w -eq $px -and $c.h -eq $px) "crop is $($c.w)x$($c.h), expected ${px}x${px} (256 points at native pixels)"
+    if (Test-Path $cropOut) {
+        Check ((Get-Item $cropOut).Length -eq $c.bytes) 'crop: bytes do not match the file'
+        $ci = [System.Drawing.Image]::FromFile($cropOut)
+        try { Check ($ci.Width -eq $c.w -and $ci.Height -eq $c.h) 'crop file size is not the answered size' } finally { $ci.Dispose() }
+    } else { Fail 'crop: file missing' }
+    Check (-not (Test-Path "$cropOut.tmp")) 'crop: .tmp left behind'
+    $cbad = Ask-Shots @{ op = 'crop'; display = '999999'; x = 0; y = 0; w = 10; h = 10; path = $cropOut }
+    Check ($cbad.ok -eq $false -and $cbad.error -is [string]) 'crop of an unknown display must fail cleanly'
+    Remove-Item $cropOut -Force -ErrorAction SilentlyContinue
+    $su = Ask-Shots @{ op = 'usage' }
+    Check ($su.cpuMs -gt 0 -and $su.rssMb -gt 0) "shots usage: $($su | ConvertTo-Json -Compress)"
+
     # timing
     $gm = New-Object System.Collections.ArrayList
     $sm = New-Object System.Collections.ArrayList
@@ -366,6 +393,63 @@ finally {
         try { $sp.StandardInput.Close() } catch { }
         if (-not $sp.WaitForExit(5000)) { Fail 'shots helper did not exit after stdin closed'; $sp.Kill() }
         elseif ($sp.ExitCode -ne 0) { Fail "shots helper exit code $($sp.ExitCode)" }
+    }
+}
+
+# ---- ocr mode: known text from the fixture (`probe.ps1 --ocr`) ----
+function Start-Ocr {
+    $psi3 = New-Object System.Diagnostics.ProcessStartInfo
+    $psi3.FileName = 'powershell.exe'
+    $psi3.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$probe`" --ocr"
+    $psi3.UseShellExecute = $false
+    $psi3.RedirectStandardInput = $true
+    $psi3.RedirectStandardOutput = $true
+    $psi3.CreateNoWindow = $true
+    return [System.Diagnostics.Process]::Start($psi3)
+}
+function Ask-Ocr($proc, [hashtable]$req, [int]$timeoutMs = 60000) {
+    $req['id'] = 1
+    $proc.StandardInput.WriteLine(($req | ConvertTo-Json -Compress)); $proc.StandardInput.Flush()
+    $task = $proc.StandardOutput.ReadLineAsync()
+    if (-not $task.Wait($timeoutMs)) { throw "no answer to ocr $($req.op) within $timeoutMs ms" }
+    if ($null -eq $task.Result) { throw "ocr helper closed stdout (exit code $($proc.ExitCode))" }
+    return $task.Result | ConvertFrom-Json
+}
+$op = $null
+try {
+    $fixture = (Resolve-Path (Join-Path $PSScriptRoot '..\..\test\fixtures\ocr-text.jpg')).ProviderPath
+    $op = Start-Ocr
+    $r = Ask-Ocr $op @{ op = 'read'; path = $fixture }
+    if ($r.error -eq 'no OCR language installed') {
+        # A bare Windows Server image: add the en-US OCR language (CI runs as admin), then retry.
+        Write-Host 'installing the en-US OCR language'
+        $op.StandardInput.Close(); [void]$op.WaitForExit(5000)
+        Add-WindowsCapability -Online -Name 'Language.OCR~~~en-US~0.0.1.0' | Out-Null
+        $op = Start-Ocr
+        $r = Ask-Ocr $op @{ op = 'read'; path = $fixture }
+    }
+    Write-Host ('ocr: ' + ($r | ConvertTo-Json -Compress -Depth 4))
+    Check (-not $r.error) "ocr read: $($r.error)"
+    Check ($r.w -eq 640 -and $r.h -eq 200) 'ocr: image size in the answer'
+    $lines = @($r.lines)
+    $submit = @($lines | Where-Object { $_.text -match 'submit' })[0]
+    $hello = @($lines | Where-Object { $_.text -match 'hello' })[0]
+    Check ($null -ne $submit -and $null -ne $hello) 'ocr: the known text was not read'
+    if ($submit -and $hello) {
+        Check ($submit.y -lt $hello.y) 'ocr: top-left origin (the upper line has the smaller y)'
+        Check ($submit.x -ge 30 -and $submit.x -le 50 -and $submit.w -gt 150 -and $submit.w -lt 400) 'ocr: box in image pixels'
+    }
+    $missing = Ask-Ocr $op @{ op = 'read'; path = (Join-Path $env:TEMP 'autotrack-no-such.jpg') }
+    Check ($missing.error -is [string]) 'ocr of a missing image must answer an error'
+    $ou = Ask-Ocr $op @{ op = 'usage' }
+    Check ($ou.cpuMs -gt 0 -and $ou.rssMb -gt 0) "ocr usage: $($ou | ConvertTo-Json -Compress)"
+    Write-Host "ocr helper RSS $($ou.rssMb) MB"
+}
+catch { Fail $_.Exception.Message }
+finally {
+    if ($op) {
+        try { $op.StandardInput.Close() } catch { }
+        if (-not $op.WaitForExit(5000)) { Fail 'ocr helper did not exit after stdin closed'; $op.Kill() }
     }
 }
 
