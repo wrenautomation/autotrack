@@ -5,12 +5,15 @@
 #
 # The code comes from `autobrowse autotrack enroll <device>`. Other env, for tests:
 #   AUTOTRACK_BUNDLE         local path or URL of the bundle instead of the latest release;
-#                            SHA256SUMS is read from beside it
+#                            SHA256SUMS is read from beside it. A folder works too: the bundle for
+#                            this CPU is taken from it (the installer app's Resources/bundles)
 #   AUTOTRACK_DIR            data dir (default ~/Library/Application Support/autotrack)
 #   AUTOTRACK_ENDPOINT       S3-compatible endpoint instead of AWS
 #   AUTOTRACK_NO_AUTOSTART=1 install everything but load no LaunchAgent and ask for nothing
 #   AUTOTRACK_PERM_TIMEOUT   seconds to wait for the permissions (default 600)
 #   AUTOTRACK_NO_BROWSER=1   unpack the extension but don't copy its path or open a browser
+#   AUTOTRACK_STEP=check     only check the code and the bundle's checksum; touches nothing (the
+#                            installer app asks for the code, checks it, then installs)
 set -eu
 
 REPO=wrenautomation/autotrack
@@ -46,6 +49,8 @@ uid=$(id -u)
 plist="$HOME/Library/LaunchAgents/$LABEL.plist"
 autostart=1
 [ -n "${AUTOTRACK_NO_AUTOSTART:-}" ] && autostart=
+step=${AUTOTRACK_STEP:-all}
+case $step in all | check) ;; *) die "AUTOTRACK_STEP must be all or check (got '$step')." ;; esac
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -61,6 +66,7 @@ fetch() { # <src> <dest>: http(s) URL, file:// URL or a path
 
 if [ -n "${AUTOTRACK_BUNDLE:-}" ]; then
   src=$AUTOTRACK_BUNDLE
+  [ -d "$src" ] && src="$src/$asset"
   asset=$(basename "$src")
   sums="$(dirname "$src")/SHA256SUMS"
 else
@@ -77,15 +83,22 @@ got=$(shasum -a 256 "$tmp/$asset" | awk '{ print $1 }')
 [ "$got" = "$want" ] || die "checksum mismatch for $asset: got $got, want $want"
 say "Checksum ok"
 
-mkdir -p "$data"
-chmod 700 "$data"
-rm -rf "$data/app.new"
-mkdir "$data/app.new"
-tar -xzf "$tmp/$asset" -C "$data/app.new" || die "could not unpack $asset"
-if ! "$data/app.new/node/node" "$data/app.new/install/setup.mjs" --check; then
-  rm -rf "$data/app.new"
+# `check` unpacks into the temp dir and leaves the data dir alone.
+if [ "$step" = check ]; then
+  new="$tmp/app.new"
+else
+  mkdir -p "$data"
+  chmod 700 "$data"
+  new="$data/app.new"
+fi
+rm -rf "$new"
+mkdir "$new"
+tar -xzf "$tmp/$asset" -C "$new" || die "could not unpack $asset"
+if ! "$new/node/node" "$new/install/setup.mjs" --check; then
+  rm -rf "$new"
   die "fix the code and run again"
 fi
+[ "$step" = check ] && exit 0
 
 # Stop the running one: login item first, so nothing restarts it.
 if [ -n "$autostart" ]; then launchctl bootout "gui/$uid/$LABEL" 2>/dev/null || true; fi
@@ -98,7 +111,7 @@ done
 
 rm -rf "$data/app.old"
 [ -d "$app" ] && mv "$app" "$data/app.old"
-mv "$data/app.new" "$app"
+mv "$new" "$app"
 rm -rf "$data/app.old"
 node="$app/node/node"
 cli="$app/bin/autotrack"

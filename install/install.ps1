@@ -10,6 +10,12 @@
 #   AUTOTRACK_ENDPOINT        S3-compatible endpoint instead of AWS
 #   AUTOTRACK_NO_AUTOSTART=1  install everything but register and start nothing
 #   AUTOTRACK_NO_BROWSER=1    unpack the extension but don't copy its path or open a browser
+#   AUTOTRACK_STEP            run one part: check | install | start | extension (default: all of them).
+#                             The setup program (installer/windows) runs them one at a time:
+#                               check      the code and the bundle's checksum; touches nothing
+#                               install    unpack, config, extension files, PATH, login item (not started)
+#                               start      start the recorder now and run doctor
+#                               extension  copy the extension folder path and open Chrome or Edge
 #
 # Run through `iex`, so it never calls `exit` (that would close the window): errors throw.
 
@@ -35,15 +41,24 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the pro
     }
     function Die([string]$msg) { Write-Host "autotrack install: $msg" -ForegroundColor Red; throw "autotrack install failed: $msg" }
 
-    $code = $env:AUTOTRACK
-    if (-not $code) { Die 'AUTOTRACK is not set. Run the whole line that `autobrowse autotrack enroll <device>` printed.' }
-    if ($code -notmatch '^[A-Za-z0-9_-]+$') { Die 'AUTOTRACK is not an install code (base64url expected).' }
-    if (-not [Environment]::Is64BitOperatingSystem) { Die 'autotrack needs 64-bit Windows.' }
+    $step = if ($env:AUTOTRACK_STEP) { $env:AUTOTRACK_STEP.Trim().ToLower() } else { 'all' }
+    if (@('all', 'check', 'install', 'start', 'extension') -notcontains $step) {
+        Die "AUTOTRACK_STEP must be all, check, install, start or extension (got '$step')."
+    }
+    $doInstall = @('all', 'check', 'install') -contains $step
+    $doStart = @('all', 'start') -contains $step
+    $doExtension = @('all', 'extension') -contains $step
 
     $data = if ($env:AUTOTRACK_DIR) { $env:AUTOTRACK_DIR } else { Join-Path $env:LOCALAPPDATA 'autotrack' }
     $app = Join-Path $data 'app'
-    $asset = 'autotrack-win32-x64.zip'
+    $node = Join-Path $app 'node\node.exe'
+    $cli = Join-Path $app 'dist\cli.js'
+    $vbs = Join-Path $app 'autotrack.vbs'
+    $ext = Join-Path $data 'extension'
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    $launch = "`"$wscript`" //B //Nologo `"$vbs`""
     $autostart = -not $env:AUTOTRACK_NO_AUTOSTART
+    $registered = $false
 
     function Fetch([string]$src, [string]$dest) {
         if ($src -match '^https?://') {
@@ -55,231 +70,249 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest crawls with the pro
         }
     }
 
-    if ($env:AUTOTRACK_BUNDLE) {
-        $src = $env:AUTOTRACK_BUNDLE
-        $asset = ($src -split '[\\/]')[-1]
-        $sums = $src.Substring(0, $src.Length - $asset.Length) + 'SHA256SUMS'
-    } else {
-        $src = "https://github.com/$Repo/releases/latest/download/$asset"
-        $sums = "https://github.com/$Repo/releases/latest/download/SHA256SUMS"
+    # Browser extension: three steps per browser found.
+    function Find-Browser([string]$exe, [string[]]$dirs) {
+        foreach ($root in 'HKCU', 'HKLM') {
+            $p = (Get-ItemProperty -Path "${root}:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$exe" -ErrorAction SilentlyContinue).'(default)'
+            if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+        }
+        foreach ($d in $dirs) {
+            $p = Join-Path $d $exe
+            if (Test-Path -LiteralPath $p) { return $p }
+        }
+        return $null
+    }
+    function Extension-Help {
+        Say ''
+        if ($StoreLive) {
+            Say "Browser clicks: add the autotrack extension to Chrome or Edge: $StoreUrl"
+        } elseif ($ext) {
+            Say 'Browser clicks: load the autotrack extension in Chrome or Edge.'
+            Say "Folder: $ext"
+            $pf = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA) | Where-Object { $_ }
+            $found = @()
+            if (-not $env:AUTOTRACK_NO_BROWSER) {
+                $chrome = Find-Browser 'chrome.exe' ($pf | ForEach-Object { Join-Path $_ 'Google\Chrome\Application' })
+                $edge = Find-Browser 'msedge.exe' ($pf | ForEach-Object { Join-Path $_ 'Microsoft\Edge\Application' })
+                if ($chrome) { $found += , @('Chrome', 'chrome', $chrome) }
+                if ($edge) { $found += , @('Edge', 'edge', $edge) }
+            }
+            if ($found.Count -gt 0) {
+                try { Set-Clipboard -Value $ext; Say '(Copied to your clipboard.)' } catch { }
+                foreach ($b in $found) {
+                    Say ''
+                    Say "$($b[0]):"
+                    Say "  1. Open $($b[1])://extensions and turn on Developer mode (top right)."
+                    Say '  2. Click Load unpacked.'
+                    Say '  3. Paste the folder (already copied) into the Folder box, then Select Folder.'
+                    try { Start-Process -FilePath $b[2] -ArgumentList "$($b[1])://extensions" } catch { Say "  (Could not open it: $($_.Exception.Message))" }
+                }
+                Say ''
+                Say 'If autotrack is already listed there, press its reload button instead.'
+            } else {
+                Say 'Open chrome://extensions (or edge://extensions), turn on Developer mode, Load unpacked, pick that folder.'
+            }
+        }
     }
 
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('autotrack-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $tmp | Out-Null
-    try {
-        Say "Downloading $asset"
-        $zip = Join-Path $tmp $asset
-        Fetch $src $zip
-        Fetch $sums (Join-Path $tmp 'SHA256SUMS')
-        $want = $null
-        foreach ($line in Get-Content -LiteralPath (Join-Path $tmp 'SHA256SUMS')) {
-            $f = $line.Trim() -split '\s+'
-            if ($f.Count -ge 2 -and ($f[1] -eq $asset -or $f[1] -eq "*$asset")) { $want = $f[0].ToLower(); break }
-        }
-        if (-not $want) { Die "SHA256SUMS has no line for $asset" }
-        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower()
-        if ($got -ne $want) { Die "checksum mismatch for ${asset}: got $got, want $want" }
-        Say 'Checksum ok'
+    function Running {
+        Quiet { & $node $cli status *> $null }
+        return ($LASTEXITCODE -eq 0)
+    }
 
-        New-Item -ItemType Directory -Force -Path $data | Out-Null
-        $new = Join-Path $data 'app.new'
-        if (Test-Path -LiteralPath $new) { Remove-Item -LiteralPath $new -Recurse -Force }
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [IO.Compression.ZipFile]::ExtractToDirectory($zip, $new)
-        Get-ChildItem -LiteralPath $new -Recurse -File | Unblock-File
-        Quiet { & (Join-Path $new 'node\node.exe') (Join-Path $new 'install\setup.mjs') --check }
-        if ($LASTEXITCODE -ne 0) {
-            Remove-Item -LiteralPath $new -Recurse -Force -ErrorAction SilentlyContinue
-            Die 'fix the code and run again'
+    if ($doInstall) {
+        $code = $env:AUTOTRACK
+        if (-not $code) { Die 'AUTOTRACK is not set. Run the whole line that `autobrowse autotrack enroll <device>` printed.' }
+        if ($code -notmatch '^[A-Za-z0-9_-]+$') { Die 'AUTOTRACK is not an install code (base64url expected).' }
+        if (-not [Environment]::Is64BitOperatingSystem) { Die 'autotrack needs 64-bit Windows.' }
+
+        $asset = 'autotrack-win32-x64.zip'
+        if ($env:AUTOTRACK_BUNDLE) {
+            $src = $env:AUTOTRACK_BUNDLE
+            $asset = ($src -split '[\\/]')[-1]
+            $sums = $src.Substring(0, $src.Length - $asset.Length) + 'SHA256SUMS'
+        } else {
+            $src = "https://github.com/$Repo/releases/latest/download/$asset"
+            $sums = "https://github.com/$Repo/releases/latest/download/SHA256SUMS"
         }
 
-        # Stop the running one, and any browser host using the old node.exe.
-        if ($autostart) { Stop-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue }
-        $oldNode = Join-Path $app 'node\node.exe'
-        if (Test-Path -LiteralPath $oldNode) {
-            Quiet { & $oldNode (Join-Path $app 'dist\cli.js') stop *> $null }
-        }
-        $pidFile = Join-Path $data 'track.pid'
-        for ($i = 0; $i -lt 20 -and (Test-Path -LiteralPath $pidFile); $i++) {
-            $old = Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue
-            if (-not $old -or -not (Get-Process -Id $old -ErrorAction SilentlyContinue)) { break }
-            Start-Sleep -Milliseconds 500
-        }
-        Get-Process -Name node -ErrorAction SilentlyContinue |
-            Where-Object { $_.Path -and $_.Path.StartsWith($app + '\', [StringComparison]::OrdinalIgnoreCase) } |
-            Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 300
-
-        $oldApp = Join-Path $data 'app.old'
-        if (Test-Path -LiteralPath $oldApp) { Remove-Item -LiteralPath $oldApp -Recurse -Force }
-        if (Test-Path -LiteralPath $app) {
-            try { Move-Item -LiteralPath $app -Destination $oldApp } catch { Die "could not replace $app (in use?): $($_.Exception.Message)" }
-        }
-        Move-Item -LiteralPath $new -Destination $app
-        if (Test-Path -LiteralPath $oldApp) { Remove-Item -LiteralPath $oldApp -Recurse -Force -ErrorAction SilentlyContinue }
-        $node = Join-Path $app 'node\node.exe'
-        $cli = Join-Path $app 'dist\cli.js'
-        Say "Installed $((Get-Content -LiteralPath (Join-Path $app 'VERSION')).Trim()) in $app"
-
-        Quiet { & $node (Join-Path $app 'install\setup.mjs') }
-        if ($LASTEXITCODE -ne 0) { Die 'setup failed' }
-        # config.json holds the device's key: this user only. The ACL is rebuilt rather than edited
-        # with icacls, which left SYSTEM and Administrators in on CI runners.
-        $cfgPath = Join-Path $data 'config.json'
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ('autotrack-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmp | Out-Null
         try {
-            $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
-            $sec = Get-Acl -LiteralPath $cfgPath
-            $sec.SetAccessRuleProtection($true, $false)
-            foreach ($rule in @($sec.Access)) { [void]$sec.RemoveAccessRuleAll($rule) }
-            $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))
-            Set-Acl -LiteralPath $cfgPath -AclObject $sec
-            $left = @((Get-Acl -LiteralPath $cfgPath).Access)
-            if ($left.Count -ne 1) { throw "$($left.Count) entries left" }
-        } catch { Die "could not restrict config.json to this user: $($_.Exception.Message)" }
+            Say "Downloading $asset"
+            $zip = Join-Path $tmp $asset
+            Fetch $src $zip
+            Fetch $sums (Join-Path $tmp 'SHA256SUMS')
+            $want = $null
+            foreach ($line in Get-Content -LiteralPath (Join-Path $tmp 'SHA256SUMS')) {
+                $f = $line.Trim() -split '\s+'
+                if ($f.Count -ge 2 -and ($f[1] -eq $asset -or $f[1] -eq "*$asset")) { $want = $f[0].ToLower(); break }
+            }
+            if (-not $want) { Die "SHA256SUMS has no line for $asset" }
+            $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower()
+            if ($got -ne $want) { Die "checksum mismatch for ${asset}: got $got, want $want" }
+            Say 'Checksum ok'
 
-        # The browser extension, unpacked at a stable path (Chrome and Edge reload unpacked
-        # extensions from it on restart). Replaced on update. The manifest's fixed key keeps the id.
-        $ext = Join-Path $data 'extension'
-        if (-not $StoreLive) {
-            $extNew = Join-Path $data 'extension.new'
-            $extOld = Join-Path $data 'extension.old'
+            # `check` unpacks into the temp dir and leaves the data dir alone.
+            if ($step -eq 'check') {
+                $new = Join-Path $tmp 'app.new'
+            } else {
+                New-Item -ItemType Directory -Force -Path $data | Out-Null
+                $new = Join-Path $data 'app.new'
+                if (Test-Path -LiteralPath $new) { Remove-Item -LiteralPath $new -Recurse -Force }
+            }
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [IO.Compression.ZipFile]::ExtractToDirectory($zip, $new)
+            Get-ChildItem -LiteralPath $new -Recurse -File | Unblock-File
+            Quiet { & (Join-Path $new 'node\node.exe') (Join-Path $new 'install\setup.mjs') --check }
+            if ($LASTEXITCODE -ne 0) {
+                Remove-Item -LiteralPath $new -Recurse -Force -ErrorAction SilentlyContinue
+                Die 'fix the code and run again'
+            }
+            if ($step -eq 'check') { return }
+
+            # Stop the running one, and any browser host using the old node.exe.
+            if ($autostart) { Stop-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $node) {
+                Quiet { & $node $cli stop *> $null }
+            }
+            $pidFile = Join-Path $data 'track.pid'
+            for ($i = 0; $i -lt 20 -and (Test-Path -LiteralPath $pidFile); $i++) {
+                $old = Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue
+                if (-not $old -or -not (Get-Process -Id $old -ErrorAction SilentlyContinue)) { break }
+                Start-Sleep -Milliseconds 500
+            }
+            Get-Process -Name node -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -and $_.Path.StartsWith($app + '\', [StringComparison]::OrdinalIgnoreCase) } |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 300
+
+            $oldApp = Join-Path $data 'app.old'
+            if (Test-Path -LiteralPath $oldApp) { Remove-Item -LiteralPath $oldApp -Recurse -Force }
+            if (Test-Path -LiteralPath $app) {
+                try { Move-Item -LiteralPath $app -Destination $oldApp } catch { Die "could not replace $app (in use?): $($_.Exception.Message)" }
+            }
+            Move-Item -LiteralPath $new -Destination $app
+            if (Test-Path -LiteralPath $oldApp) { Remove-Item -LiteralPath $oldApp -Recurse -Force -ErrorAction SilentlyContinue }
+            Say "Installed $((Get-Content -LiteralPath (Join-Path $app 'VERSION')).Trim()) in $app"
+
+            Quiet { & $node (Join-Path $app 'install\setup.mjs') }
+            if ($LASTEXITCODE -ne 0) { Die 'setup failed' }
+            # config.json holds the device's key: this user only. The ACL is rebuilt rather than edited
+            # with icacls, which left SYSTEM and Administrators in on CI runners.
+            $cfgPath = Join-Path $data 'config.json'
             try {
-                foreach ($d in $extNew, $extOld) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force } }
-                [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $app 'extension.zip'), $extNew)
-                if (-not (Test-Path -LiteralPath (Join-Path $extNew 'manifest.json'))) { throw 'manifest.json missing from extension.zip' }
-                if (Test-Path -LiteralPath $ext) { Move-Item -LiteralPath $ext -Destination $extOld }
-                Move-Item -LiteralPath $extNew -Destination $ext
-                if (Test-Path -LiteralPath $extOld) { Remove-Item -LiteralPath $extOld -Recurse -Force -ErrorAction SilentlyContinue }
-                Say "Extension unpacked in $ext"
-            } catch {
-                Say "Warning: could not unpack the browser extension ($($_.Exception.Message)). The recorder works without it."
-                $ext = $null
-            }
-        }
+                $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+                $sec = Get-Acl -LiteralPath $cfgPath
+                $sec.SetAccessRuleProtection($true, $false)
+                foreach ($rule in @($sec.Access)) { [void]$sec.RemoveAccessRuleAll($rule) }
+                $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))
+                Set-Acl -LiteralPath $cfgPath -AclObject $sec
+                $left = @((Get-Acl -LiteralPath $cfgPath).Access)
+                if ($left.Count -ne 1) { throw "$($left.Count) entries left" }
+            } catch { Die "could not restrict config.json to this user: $($_.Exception.Message)" }
 
-        # `autotrack` on the command line (user PATH).
-        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-        $parts = @(if ($userPath) { $userPath -split ';' | Where-Object { $_ } })
-        if (-not ($parts | Where-Object { $_.TrimEnd('\') -ieq $app })) {
-            [Environment]::SetEnvironmentVariable('Path', (($parts + $app) -join ';'), 'User')
-        }
-        if (-not (($env:Path -split ';') -contains $app)) { $env:Path = "$env:Path;$app" }
-
-        # Hidden launcher: wscript runs node with no console window and waits; a crash (non-zero
-        # exit) restarts it after 30 s, `autotrack stop` (exit 0) ends it. Like launchd KeepAlive.
-        $vbs = Join-Path $app 'autotrack.vbs'
-        $q = { param($s) $s -replace '"', '""' }
-        $lines = @('Set sh = CreateObject("WScript.Shell")')
-        if ($env:AUTOTRACK_DIR) { $lines += 'sh.Environment("PROCESS")("AUTOTRACK_DIR") = "' + (& $q $data) + '"' }
-        $lines += 'Do'
-        $lines += '  rc = sh.Run("""' + (& $q $node) + '"" ""' + (& $q $cli) + '"" start", 0, True)'
-        $lines += '  If rc = 0 Then Exit Do'
-        $lines += '  WScript.Sleep 30000'
-        $lines += 'Loop'
-        $lines += 'WScript.Quit rc'
-        Set-Content -LiteralPath $vbs -Value $lines -Encoding Unicode
-        $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
-        $launch = "`"$wscript`" //B //Nologo `"$vbs`""
-
-        # Browser extension: three steps per browser found.
-        function Find-Browser([string]$exe, [string[]]$dirs) {
-            foreach ($root in 'HKCU', 'HKLM') {
-                $p = (Get-ItemProperty -Path "${root}:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$exe" -ErrorAction SilentlyContinue).'(default)'
-                if ($p -and (Test-Path -LiteralPath $p)) { return $p }
-            }
-            foreach ($d in $dirs) {
-                $p = Join-Path $d $exe
-                if (Test-Path -LiteralPath $p) { return $p }
-            }
-            return $null
-        }
-        function Extension-Help {
-            Say ''
-            if ($StoreLive) {
-                Say "Browser clicks: add the autotrack extension to Chrome or Edge: $StoreUrl"
-            } elseif ($ext) {
-                Say 'Browser clicks: load the autotrack extension in Chrome or Edge.'
-                Say "Folder: $ext"
-                $pf = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA) | Where-Object { $_ }
-                $found = @()
-                if (-not $env:AUTOTRACK_NO_BROWSER) {
-                    $chrome = Find-Browser 'chrome.exe' ($pf | ForEach-Object { Join-Path $_ 'Google\Chrome\Application' })
-                    $edge = Find-Browser 'msedge.exe' ($pf | ForEach-Object { Join-Path $_ 'Microsoft\Edge\Application' })
-                    if ($chrome) { $found += , @('Chrome', 'chrome', $chrome) }
-                    if ($edge) { $found += , @('Edge', 'edge', $edge) }
-                }
-                if ($found.Count -gt 0) {
-                    try { Set-Clipboard -Value $ext; Say '(Copied to your clipboard.)' } catch { }
-                    foreach ($b in $found) {
-                        Say ''
-                        Say "$($b[0]):"
-                        Say "  1. Open $($b[1])://extensions and turn on Developer mode (top right)."
-                        Say '  2. Click Load unpacked.'
-                        Say '  3. Paste the folder (already copied) into the Folder box, then Select Folder.'
-                        try { Start-Process -FilePath $b[2] -ArgumentList "$($b[1])://extensions" } catch { Say "  (Could not open it: $($_.Exception.Message))" }
-                    }
-                    Say ''
-                    Say 'If autotrack is already listed there, press its reload button instead.'
-                } else {
-                    Say 'Open chrome://extensions (or edge://extensions), turn on Developer mode, Load unpacked, pick that folder.'
+            # The browser extension, unpacked at a stable path (Chrome and Edge reload unpacked
+            # extensions from it on restart). Replaced on update. The manifest's fixed key keeps the id.
+            if (-not $StoreLive) {
+                $extNew = Join-Path $data 'extension.new'
+                $extOld = Join-Path $data 'extension.old'
+                try {
+                    foreach ($d in $extNew, $extOld) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force } }
+                    [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $app 'extension.zip'), $extNew)
+                    if (-not (Test-Path -LiteralPath (Join-Path $extNew 'manifest.json'))) { throw 'manifest.json missing from extension.zip' }
+                    if (Test-Path -LiteralPath $ext) { Move-Item -LiteralPath $ext -Destination $extOld }
+                    Move-Item -LiteralPath $extNew -Destination $ext
+                    if (Test-Path -LiteralPath $extOld) { Remove-Item -LiteralPath $extOld -Recurse -Force -ErrorAction SilentlyContinue }
+                    Say "Extension unpacked in $ext"
+                } catch {
+                    Say "Warning: could not unpack the browser extension ($($_.Exception.Message)). The recorder works without it."
+                    $ext = $null
                 }
             }
-        }
 
+            # `autotrack` on the command line (user PATH).
+            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            $parts = @(if ($userPath) { $userPath -split ';' | Where-Object { $_ } })
+            if (-not ($parts | Where-Object { $_.TrimEnd('\') -ieq $app })) {
+                [Environment]::SetEnvironmentVariable('Path', (($parts + $app) -join ';'), 'User')
+            }
+            if (-not (($env:Path -split ';') -contains $app)) { $env:Path = "$env:Path;$app" }
+
+            # Hidden launcher: wscript runs node with no console window and waits; a crash (non-zero
+            # exit) restarts it after 30 s, `autotrack stop` (exit 0) ends it. Like launchd KeepAlive.
+            $q = { param($s) $s -replace '"', '""' }
+            $lines = @('Set sh = CreateObject("WScript.Shell")')
+            if ($env:AUTOTRACK_DIR) { $lines += 'sh.Environment("PROCESS")("AUTOTRACK_DIR") = "' + (& $q $data) + '"' }
+            $lines += 'Do'
+            $lines += '  rc = sh.Run("""' + (& $q $node) + '"" ""' + (& $q $cli) + '"" start", 0, True)'
+            $lines += '  If rc = 0 Then Exit Do'
+            $lines += '  WScript.Sleep 30000'
+            $lines += 'Loop'
+            $lines += 'WScript.Quit rc'
+            Set-Content -LiteralPath $vbs -Value $lines -Encoding Unicode
+
+            if (-not $autostart) {
+                Say 'AUTOTRACK_NO_AUTOSTART set: no task registered, not started.'
+            } else {
+                # Per-user logon task, no admin. Fallback: the Run key.
+                try {
+                    $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                    $action = New-ScheduledTaskAction -Execute $wscript -Argument "//B //Nologo `"$vbs`""
+                    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+                    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                        -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+                        -MultipleInstances IgnoreNew
+                    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+                    Register-ScheduledTask -TaskName $Task -Action $action -Trigger $trigger -Settings $settings `
+                        -Principal $principal -Description 'autotrack recorder (wrenautomation/autotrack)' -Force | Out-Null
+                    $registered = $true
+                    Remove-ItemProperty -Path $RunKey -Name $Task -ErrorAction SilentlyContinue
+                    Say "Login item: scheduled task '$Task'"
+                } catch {
+                    Set-ItemProperty -Path $RunKey -Name $Task -Value $launch
+                    Say "Login item: Run key (task not allowed here: $($_.Exception.Message))"
+                }
+            }
+        } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($doStart) {
         if (-not $autostart) {
-            Say 'AUTOTRACK_NO_AUTOSTART set: no task registered, not started.'
-            Extension-Help
-            return
-        }
-
-        # Per-user logon task, no admin. Fallback: the Run key.
-        $registered = $false
-        try {
-            $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-            $action = New-ScheduledTaskAction -Execute $wscript -Argument "//B //Nologo `"$vbs`""
-            $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
-            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-                -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
-                -MultipleInstances IgnoreNew
-            $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
-            Register-ScheduledTask -TaskName $Task -Action $action -Trigger $trigger -Settings $settings `
-                -Principal $principal -Description 'autotrack recorder (wrenautomation/autotrack)' -Force | Out-Null
-            $registered = $true
-            Remove-ItemProperty -Path $RunKey -Name $Task -ErrorAction SilentlyContinue
-            Say "Login item: scheduled task '$Task'"
-        } catch {
-            Set-ItemProperty -Path $RunKey -Name $Task -Value $launch
-            Say "Login item: Run key (task not allowed here: $($_.Exception.Message))"
-        }
-
-        function Running {
-            Quiet { & $node $cli status *> $null }
-            return ($LASTEXITCODE -eq 0)
-        }
-        if ($registered) { Start-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue }
-        $up = $false
-        for ($i = 0; $i -lt 15; $i++) { Start-Sleep -Seconds 1; if (Running) { $up = $true; break } }
-        if (-not $up) {
-            Start-Process -FilePath $wscript -ArgumentList '//B', '//Nologo', "`"$vbs`""
+            if ($step -eq 'start') { Say 'AUTOTRACK_NO_AUTOSTART set: not started.' }
+        } else {
+            if (-not (Test-Path -LiteralPath $node)) { Die "autotrack is not installed in $app" }
+            if ($step -eq 'start') { $registered = [bool](Get-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue) }
+            if ($registered) { Start-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue }
+            $up = $false
             for ($i = 0; $i -lt 15; $i++) { Start-Sleep -Seconds 1; if (Running) { $up = $true; break } }
-        }
-        if (-not $up) {
-            $log = Join-Path $data 'track.log'
-            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 20 | ForEach-Object { Write-Host "  $_" } }
-            Die "autotrack did not start; see $log"
-        }
-        Say 'Started'
+            if (-not $up) {
+                Start-Process -FilePath $wscript -ArgumentList '//B', '//Nologo', "`"$vbs`""
+                for ($i = 0; $i -lt 15; $i++) { Start-Sleep -Seconds 1; if (Running) { $up = $true; break } }
+            }
+            if (-not $up) {
+                $log = Join-Path $data 'track.log'
+                if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 20 | ForEach-Object { Write-Host "  $_" } }
+                Die "autotrack did not start; see $log"
+            }
+            Say 'Started'
 
-        Say ''
-        Say 'Checking (about 15 seconds)...'
-        Quiet { & $node $cli doctor }
-        Say ''
-        Say 'autotrack is recording.'
-        Say 'Pause or resume: Ctrl+Alt+Shift+P (a notification says which).'
-        Say 'Status: autotrack status    Uninstall: autotrack uninstall   (new terminals; or run'
-        Say "  `"$app\autotrack.cmd`" status)"
+            Say ''
+            Say 'Checking (about 15 seconds)...'
+            Quiet { & $node $cli doctor }
+            Say ''
+            Say 'autotrack is recording.'
+            Say 'Pause or resume: Ctrl+Alt+Shift+P (a notification says which).'
+            Say 'Status: autotrack status    Uninstall: autotrack uninstall   (new terminals; or run'
+            Say "  `"$app\autotrack.cmd`" status)"
+        }
+    }
+
+    if ($doExtension) {
+        # Run on its own (the setup program's finish page), the folder is whatever install left.
+        if ($step -eq 'extension' -and -not (Test-Path -LiteralPath (Join-Path $ext 'manifest.json'))) { $ext = $null }
         Extension-Help
-    } finally {
-        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
