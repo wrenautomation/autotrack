@@ -2,7 +2,7 @@
 # Re-running it updates in place. The recorder also updates itself (src/update.ts): each version
 # lives in <data>\versions\<v> and <data>\app is a junction to the current one.
 #
-#   powershell -c "$env:AUTOTRACK='<install code>'; irm https://raw.githubusercontent.com/wrenautomation/autotrack/main/install/install.ps1 | iex"
+#   $env:AUTOTRACK='<install code>'; irm https://raw.githubusercontent.com/wrenautomation/autotrack/main/install/install.ps1 | iex   (in PowerShell)
 #
 # The code comes from `autobrowse autotrack enroll <device>`. Other env, for tests:
 #   AUTOTRACK_BUNDLE          local path or URL of the bundle instead of the latest release;
