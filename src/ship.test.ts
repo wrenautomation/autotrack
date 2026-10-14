@@ -7,6 +7,7 @@ import { startStub } from "../test/e2e/s3-stub.mjs";
 import { parseConfig, type TrackCode } from "./config.ts";
 import {
   capFrames,
+  checkShip,
   countSegments,
   DirShipper,
   finishWaiting,
@@ -358,6 +359,34 @@ describe("s3Store against the stub", () => {
         .put("someone-else/x", Buffer.from("x"), "text/plain")
         .catch((e) => e);
       expect(denied.status).toBe(403);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("doctor's test upload lands under the device and names a refused key", async () => {
+    const stub = await startStub({
+      root: join(root, "s3"),
+      keyId: code.keyId,
+      secret: code.secret,
+      prefix: "laptop/",
+    });
+    try {
+      const encode = (c: TrackCode) => Buffer.from(JSON.stringify(c)).toString("base64url");
+      const good = await checkShip(
+        parseConfig({ code: encode(code), endpoint: stub.url }),
+        "9.9.9",
+      );
+      expect(good.ok).toBe(true);
+      expect(stub.puts.map((p) => p.key)).toEqual(["laptop/doctor.txt"]);
+      const wrong = { ...code, secret: "wrong-secret-0123456789" };
+      const bad = await checkShip(
+        parseConfig({ code: encode(wrong), endpoint: stub.url }),
+        "9.9.9",
+      );
+      expect(bad.ok).toBe(false);
+      expect(bad.message).toContain("403 SignatureDoesNotMatch");
+      expect(await checkShip(parseConfig({}), "9.9.9")).toMatchObject({ ok: false });
     } finally {
       await stub.close();
     }

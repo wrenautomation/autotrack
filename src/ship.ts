@@ -475,3 +475,28 @@ export function shipperFor(data: string, config: Config, log?: (msg: string) => 
     ...(log ? { log } : {}),
   });
 }
+
+/**
+ * One small PUT to `<device>/doctor.txt` (not a session, so nothing reads it): proves the key,
+ * the clock and the network before a segment needs them.
+ */
+export async function checkShip(
+  config: Config,
+  version: string,
+): Promise<{ ok: boolean; message: string }> {
+  if (!config.ship) return { ok: false, message: "no install code: nothing ships" };
+  const store = s3Store({
+    code: config.ship,
+    timeoutMs: 20_000,
+    ...(config.endpoint ? { endpoint: config.endpoint } : {}),
+  });
+  const body = new TextEncoder().encode(
+    `autotrack ${version} doctor ${new Date().toISOString()}\n`,
+  );
+  try {
+    await store.put(`${config.ship.device}/doctor.txt`, body, "text/plain");
+    return { ok: true, message: "test upload ok: the key, clock and network work" };
+  } catch (e) {
+    return { ok: false, message: `test upload failed: ${(e as Error).message}` };
+  }
+}

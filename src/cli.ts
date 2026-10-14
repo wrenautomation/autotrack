@@ -32,7 +32,7 @@ import { ocrHelper } from "./ocr.ts";
 import { helperCommand, openProbe, PACKAGE_ROOT } from "./probe.ts";
 import { ask } from "./prompt.ts";
 import { Recorder, type Status } from "./recorder.ts";
-import { noShipper, type Shipper, shipperFor } from "./ship.ts";
+import { checkShip, noShipper, type Shipper, shipperFor } from "./ship.ts";
 import { syntheticHook, syntheticRate } from "./synthetic.ts";
 import { busyMeter, macPower, powerOf } from "./system.ts";
 import { removeLaterWin, uninstall } from "./uninstall.ts";
@@ -333,6 +333,10 @@ async function doctor(data: string): Promise<number> {
       ? `ships to s3://${config.ship.bucket}/${config.device}/`
       : "no install code: nothing ships",
   );
+  if (config.ship) {
+    const put = await checkShip(config, VERSION);
+    line(put.ok, put.message);
+  }
   const helper = helperCommand();
   line(
     !!helper,
