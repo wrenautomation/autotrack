@@ -19,3 +19,13 @@ Shots mode also answers `crop` (one rect of a display at its native pixels, JPEG
 ## OCR mode
 
 `mac/probe --ocr` and `win\autotrack-helper.exe --ocr` read text from one image per `read` request: Vision (accurate) on the Mac at background QoS, `Windows.Media.Ocr` on Windows at BelowNormal priority. Boxes are in image pixels, origin top-left; Windows gives no confidence. The recorder starts it only when the person is idle and kills it at the first input. `mac/test.sh` runs `mac/test-ocr.mjs` and `win\test.ps1` runs the same check, both on `test/fixtures/ocr-text.jpg`. A Windows install with no OCR language answers an error; the test adds en-US then.
+
+## Linux
+
+`linux/autotrack-helper` is one static Rust binary (musl, x86_64) with the same three modes and protocol. `sh linux/build.sh` builds it (needs the `x86_64-unknown-linux-musl` target; on other hosts it only type-checks). `cargo test` in `linux/` runs the unit tests and works on any OS.
+
+- `--probe` reads elements over AT-SPI (D-Bus) and windows over X11 (`_NET_ACTIVE_WINDOW`, `_NET_WM_PID`). A password field is role `password text`. A text field's name comes only from its label, so its text is never sent. The clipboard watch reads the X `CLIPBOARD` owner's targets and marks a copy concealed when it carries `x-kde-passwordManagerHint`. `power` reads `/sys/class/power_supply`. `perm` adds `session`, `atspi` and `record`.
+- `--shots` grabs one RandR monitor through MIT-SHM, falling back to plain `GetImage`, and writes JPEG.
+- `--ocr` runs `tesseract` at nice 10 on one thread and parses its TSV. With no `tesseract` the recorder doesn't start it and counts the frames as skipped.
+
+Wayland gives no global input or screen access, so only XWayland apps are seen there. `node linux/test.mjs` checks every mode against GTK windows in a real X session; CI runs it in Xvfb. Don't run it on a desktop you're using: it moves the pointer and types.

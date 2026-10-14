@@ -1,7 +1,7 @@
 name: release
 
-# Push a tag like v0.1.0 (matching package.json) to build the three bundles and the two installers
-# (Windows setup .exe, Mac disk image) on their own runners and publish them with SHA256SUMS as a
+# Push a tag like v0.1.0 (matching package.json) to build the four bundles and the three installers
+# (Windows setup .exe, Mac disk image, Linux .run) on their own runners and publish them with SHA256SUMS as a
 # GitHub Release. The one-line installers fetch releases/latest. A tag with a dash (v0.1.1-rc.1) is
 # published as a prerelease: GitHub never makes it "latest", so the one-line installs ignore it.
 on:
@@ -21,6 +21,7 @@ jobs:
           - { os: windows-latest, target: win32-x64, file: autotrack-win32-x64.zip }
           - { os: macos-latest, target: darwin-arm64, file: autotrack-darwin-arm64.tar.gz }
           - { os: macos-15-intel, target: darwin-x64, file: autotrack-darwin-x64.tar.gz }
+          - { os: ubuntu-latest, target: linux-x64, file: autotrack-linux-x64.tar.gz }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -36,6 +37,9 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: rust musl target (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y -q musl-tools && rustup target add x86_64-unknown-linux-musl
       - run: node scripts/bundle.mjs
       - uses: actions/upload-artifact@v4
         with:
@@ -90,8 +94,31 @@ jobs:
           path: installer/mac/out/autotrack-*.dmg
           if-no-files-found: error
 
+  # The Linux installer: one self-extracting .run with install.sh and the linux-x64 bundle.
+  installer-linux:
+    needs: bundle
+    name: installer linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle-linux-x64
+          path: bundles
+      - name: build
+        run: sh installer/linux/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-linux
+          path: installer/linux/out/autotrack-*.run
+          if-no-files-found: error
+
   publish:
-    needs: [bundle, installer-windows, installer-mac]
+    needs: [bundle, installer-windows, installer-mac, installer-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -129,7 +156,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
@@ -143,7 +170,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          case "$RUNNER_OS" in macOS) asset=autotrack-darwin-arm64.tar.gz ;; *) asset=autotrack-win32-x64.zip ;; esac
+          case "$RUNNER_OS" in macOS) asset=autotrack-darwin-arm64.tar.gz ;; Linux) asset=autotrack-linux-x64.tar.gz ;; *) asset=autotrack-win32-x64.zip ;; esac
           mkdir -p "$RUNNER_TEMP/rel"
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --pattern SHA256SUMS --dir "$RUNNER_TEMP/rel"
           echo "AUTOTRACK_BUNDLE=$RUNNER_TEMP/rel/$asset" >> "$GITHUB_ENV"
@@ -162,6 +189,16 @@ jobs:
           grep -q "^${GITHUB_REF_NAME#v}+" "$HOME/Library/Application Support/autotrack/app/VERSION"
           "$cli" uninstall --yes
           test ! -e "$HOME/Library/Application Support/autotrack/app"
+      - name: install, doctor, uninstall (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sh -c "$(curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/install/install.sh)"
+          app="$HOME/.local/share/autotrack/app"
+          "$app/bin/autotrack" doctor || true
+          grep -q "^${GITHUB_REF_NAME#v}+" "$app/VERSION"
+          test -x "$app/helpers/linux/autotrack-helper"
+          "$app/bin/autotrack" uninstall --yes
+          test ! -e "$app"
       - name: install, doctor, uninstall (windows)
         if: runner.os == 'Windows'
         shell: powershell
@@ -178,14 +215,15 @@ jobs:
           if (Test-Path $app) { throw "uninstall left $app" }
 
   # The installers, as downloaded from the release just published: the Mac disk image is mounted and
-  # run with no UI; the Windows setup program runs silently, then Add/Remove Programs uninstalls it.
+  # run with no UI; the Windows setup program runs silently, then Add/Remove Programs uninstalls it;
+  # the Linux .run runs with the code in the environment, then --uninstall.
   smoke-installer:
     needs: publish
     name: installer from the release, ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
@@ -200,6 +238,14 @@ jobs:
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "autotrack-$v.dmg" --pattern SHA256SUMS --dir dl
           (cd dl && grep " autotrack-$v.dmg\$" SHA256SUMS | shasum -a 256 -c -)
           sh installer/mac/smoke.sh "dl/autotrack-$v.dmg" "$v"
+      - name: download, verify, install, doctor, uninstall (linux)
+        if: runner.os == 'Linux'
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          mkdir dl
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "autotrack-$v-linux-x64.run" --pattern SHA256SUMS --dir dl
+          (cd dl && grep " autotrack-$v-linux-x64.run\$" SHA256SUMS | sha256sum -c -)
+          sh installer/linux/smoke.sh "dl/autotrack-$v-linux-x64.run" "$v"
       - name: download, verify, install, doctor, uninstall (windows)
         if: runner.os == 'Windows'
         shell: powershell

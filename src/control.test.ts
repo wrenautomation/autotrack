@@ -13,7 +13,7 @@ import {
   send,
   serve,
 } from "./control.ts";
-import { notifyCommand } from "./notify.ts";
+import { gvariantString, notifyCommand } from "./notify.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -124,6 +124,19 @@ describe("control", () => {
       args: ["-e", 'display notification "Say \\"hi\\"" with title "autotrack"'],
     });
     expect(notifyCommand("autotrack", "it's on", "win32")?.args.at(-1)).toContain("it''s on");
-    expect(notifyCommand("a", "b", "linux")).toBeNull();
+    expect(notifyCommand("a", "b", "freebsd")).toBeNull();
+  });
+
+  it("Linux notifications: notify-send, else gdbus, else none", () => {
+    expect(notifyCommand("autotrack", "Tracking paused", "linux", () => true)).toEqual({
+      cmd: "notify-send",
+      args: ["-a", "autotrack", "autotrack", "Tracking paused"],
+    });
+    const g = notifyCommand("autotrack", "it's on", "linux", (c) => c === "gdbus");
+    expect(g?.cmd).toBe("gdbus");
+    expect(g?.args).toContain("--method=org.freedesktop.Notifications.Notify");
+    expect(g?.args).toContain("'it\\'s on'");
+    expect(gvariantString("a\\b'c")).toBe("'a\\\\b\\'c'");
+    expect(notifyCommand("a", "b", "linux", () => false)).toBeNull();
   });
 });

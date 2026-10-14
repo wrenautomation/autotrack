@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { autostartFile, serviceFile } from "./linux.ts";
 import { agentPlist, type UninstallDeps, uninstall } from "./uninstall.ts";
 
 let root: string;
@@ -116,5 +117,31 @@ describe("uninstall", () => {
     expect(later).toEqual([data]);
     expect(existsSync(join(data, "config.json"))).toBe(false);
     expect(existsSync(join(data, "app"))).toBe(true); // left for removeLater
+  });
+
+  it("Linux: the user unit disabled and removed, the autostart entry and shim too", async () => {
+    const config = join(home, ".config");
+    mkdirSync(join(config, "systemd", "user"), { recursive: true });
+    mkdirSync(join(config, "autostart"), { recursive: true });
+    writeFileSync(serviceFile(config), "[Unit]\n");
+    writeFileSync(autostartFile(config), "[Desktop Entry]\n");
+    const { d, calls } = deps({ platform: "linux", config });
+    await uninstall(d);
+    expect(calls).toEqual([
+      "systemctl --user disable --now autotrack.service",
+      "systemctl --user daemon-reload",
+      "stop",
+      "host",
+    ]);
+    expect(existsSync(serviceFile(config))).toBe(false);
+    expect(existsSync(autostartFile(config))).toBe(false);
+    expect(existsSync(join(home, ".local", "bin", "autotrack"))).toBe(false);
+    expect(existsSync(data)).toBe(false);
+  });
+
+  it("Linux without a unit: no systemctl", async () => {
+    const { d, calls } = deps({ platform: "linux", config: join(home, ".config") });
+    await uninstall(d);
+    expect(calls).toEqual(["stop", "host"]);
   });
 });

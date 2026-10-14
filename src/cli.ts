@@ -26,6 +26,7 @@ import { type Command, lock, type Request, runningPid, send, serve } from "./con
 import { type Coords, coordsFor } from "./coords.ts";
 import { startHook, uiohook } from "./hook.ts";
 import { pinnedLevel } from "./level.ts";
+import { linuxDoctor, linuxPower, osRelease } from "./linux.ts";
 import { notify } from "./notify.ts";
 import { ocrHelper } from "./ocr.ts";
 import { helperCommand, openProbe, PACKAGE_ROOT } from "./probe.ts";
@@ -52,6 +53,7 @@ function osVersion(): string {
       return execFileSync("sw_vers", ["-productVersion"], { encoding: "utf8" }).trim();
     } catch {}
   }
+  if (process.platform === "linux") return osRelease() ?? release();
   return release();
 }
 
@@ -114,7 +116,9 @@ async function openRecorder(
     power:
       process.platform === "darwin"
         ? macPower
-        : async () => (probe.available ? powerOf(await probe.power()) : null),
+        : process.platform === "linux"
+          ? () => linuxPower()
+          : async () => (probe.available ? powerOf(await probe.power()) : null),
     busy: busyMeter(process.platform),
     helperUsage: async () => {
       const [p, s] = await Promise.all([probe.usage(), shots.usage()]);
@@ -149,6 +153,8 @@ async function start(data: string): Promise<number> {
     log(`start failed: ${(e as Error).message}`);
     if (process.platform === "darwin")
       log("on Mac this usually means Accessibility or Input Monitoring is not granted to this app");
+    if (process.platform === "linux")
+      log("on Linux this usually means no X display (DISPLAY unset) or no RECORD extension");
     return 1;
   }
   log(`recording ${recorder.journal.dir}`);
@@ -349,6 +355,14 @@ async function doctor(data: string): Promise<number> {
       line(perm.accessibility, `Accessibility ${perm.accessibility ? "granted" : "NOT granted"}`);
       line(perm.input, `Input Monitoring ${perm.input ? "granted" : "NOT granted"}`);
       line(perm.screen, `Screen Recording ${perm.screen ? "granted" : "NOT granted"}`);
+    }
+  } else if (process.platform === "linux") {
+    const probe = openProbe();
+    const perm = probe.available ? await probe.perm(3000) : null;
+    probe.close();
+    for (const l of linuxDoctor(perm)) {
+      if (l.good === null) console.log(`     ${l.msg}`);
+      else line(l.good, l.msg);
     }
   } else if (process.platform === "win32") console.log("     permissions: none needed on Windows");
   const size = dirSize(data);

@@ -1,14 +1,14 @@
 /**
  * The governor's readings of the machine: power (Mac `pmset -g batt`, Windows the probe's `power`
- * op over `GetSystemPowerStatus`) and how busy the system is over 60 s (Mac load average per
- * core, Windows the share of CPU time idle, from `os.cpus()` which reads `GetSystemTimes`' per-core
- * counters).
+ * op over `GetSystemPowerStatus`, Linux `/sys/class/power_supply` in linux.ts) and how busy the
+ * system is over 60 s (Mac and Linux load average per core, Windows the share of CPU time idle,
+ * from `os.cpus()` which reads `GetSystemTimes`' per-core counters).
  */
 import { execFile } from "node:child_process";
 import { cpus, loadavg } from "node:os";
 import type { Busy, Power } from "./level.ts";
 
-/** Mac: load average per core over this is busy. */
+/** Mac, Linux: load average per core over this is busy. */
 export const BUSY_LOAD = 0.85;
 /** Windows: CPU idle under this % is busy. */
 export const BUSY_IDLE_PCT = 15;
@@ -56,7 +56,7 @@ const sumTimes = (): CpuTimes => {
 };
 
 /**
- * How busy the system is. Mac: the 1-minute load average per core. Windows (and anything else):
+ * How busy the system is. Mac, Linux: the 1-minute load average per core. Windows (and anything else):
  * idle CPU time over a sliding 60 s window of 10 s samples (null until the window is full).
  */
 export function busyMeter(
@@ -65,7 +65,7 @@ export function busyMeter(
   now: () => number = () => performance.now(),
   windowMs = 60_000,
 ): () => Busy | null {
-  if (platform === "darwin") {
+  if (platform === "darwin" || platform === "linux") {
     const load = read.load ?? (() => loadavg()[0] ?? 0);
     const cores = read.cores ?? (() => cpus().length || 1);
     return () => {

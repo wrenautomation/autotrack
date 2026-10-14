@@ -1,23 +1,25 @@
 #!/bin/sh
-# autotrack installer for Mac. No sudo, no Node needed. Re-running it updates in place.
+# autotrack installer for Mac and Linux. No sudo, no Node needed. Re-running it updates in place.
 #
 #   AUTOTRACK='<install code>' sh -c "$(curl -fsSL https://raw.githubusercontent.com/wrenautomation/autotrack/main/install/install.sh)"
 #
 # The code comes from `autobrowse autotrack enroll <device>`. Other env, for tests:
 #   AUTOTRACK_BUNDLE         local path or URL of the bundle instead of the latest release;
 #                            SHA256SUMS is read from beside it. A folder works too: the bundle for
-#                            this CPU is taken from it (the installer app's Resources/bundles)
-#   AUTOTRACK_DIR            data dir (default ~/Library/Application Support/autotrack)
+#                            this OS and CPU is taken from it (the installers' bundled copies)
+#   AUTOTRACK_DIR            data dir (default ~/Library/Application Support/autotrack on Mac,
+#                            ${XDG_DATA_HOME:-~/.local/share}/autotrack on Linux)
 #   AUTOTRACK_ENDPOINT       S3-compatible endpoint instead of AWS
-#   AUTOTRACK_NO_AUTOSTART=1 install everything but load no LaunchAgent and ask for nothing
-#   AUTOTRACK_PERM_TIMEOUT   seconds to wait for the permissions (default 600)
+#   AUTOTRACK_NO_AUTOSTART=1 install everything but start nothing at login and ask for nothing
+#   AUTOTRACK_PERM_TIMEOUT   seconds to wait for the Mac permissions (default 600)
 #   AUTOTRACK_NO_BROWSER=1   unpack the extension but don't copy its path or open a browser
 #   AUTOTRACK_STEP=check     only check the code and the bundle's checksum; touches nothing (the
-#                            installer app asks for the code, checks it, then installs)
+#                            installer apps ask for the code, check it, then install)
 set -eu
 
 REPO=wrenautomation/autotrack
 LABEL=com.wrenautomation.autotrack
+SERVICE=autotrack.service
 # The extension ships unpacked until it is on the Chrome Web Store. Set STORE_LIVE=1 once the
 # listing exists: the installer then prints STORE_URL and no longer unpacks or opens anything.
 STORE_LIVE=0
@@ -29,21 +31,38 @@ die() {
   exit 1
 }
 
-[ "$(uname -s)" = Darwin ] || die "this installer is for Mac. On Windows, use install.ps1 (see the README)."
+os=$(uname -s)
+case $os in
+  Darwin | Linux) ;;
+  *) die "this installer is for Mac and Linux. On Windows, use install.ps1 (see the README)." ;;
+esac
 code=${AUTOTRACK:-}
 [ -n "$code" ] || die "AUTOTRACK is not set. Run the whole line that \`autobrowse autotrack enroll <device>\` printed."
 case $code in *[!A-Za-z0-9_-]*) die "AUTOTRACK is not an install code (base64url expected).";; esac
 
 arch=$(uname -m)
-[ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ] && arch=arm64 # Rosetta shell
-case $arch in
-  arm64) arch=arm64 ;;
-  x86_64) arch=x64 ;;
-  *) die "unsupported CPU: $arch" ;;
-esac
-asset="autotrack-darwin-$arch.tar.gz"
+if [ "$os" = Darwin ]; then
+  [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ] && arch=arm64 # Rosetta shell
+  case $arch in
+    arm64) arch=arm64 ;;
+    x86_64) arch=x64 ;;
+    *) die "unsupported CPU: $arch" ;;
+  esac
+  asset="autotrack-darwin-$arch.tar.gz"
+  data=${AUTOTRACK_DIR:-"$HOME/Library/Application Support/autotrack"}
+else
+  case $arch in
+    x86_64 | amd64) arch=x64 ;;
+    *) die "unsupported CPU: $arch (Linux builds are x86_64 only)" ;;
+  esac
+  asset="autotrack-linux-$arch.tar.gz"
+  data=${AUTOTRACK_DIR:-"${XDG_DATA_HOME:-$HOME/.local/share}/autotrack"}
+  config=${XDG_CONFIG_HOME:-}
+  case $config in /*) ;; *) config="$HOME/.config" ;; esac
+  unit="$config/systemd/user/$SERVICE"
+  desktop="$config/autostart/autotrack.desktop"
+fi
 
-data=${AUTOTRACK_DIR:-"$HOME/Library/Application Support/autotrack"}
 app="$data/app"
 uid=$(id -u)
 plist="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -58,10 +77,21 @@ trap 'exit 130' INT TERM
 
 fetch() { # <src> <dest>: http(s) URL, file:// URL or a path
   case $1 in
-    http://* | https://*) curl -fsSL --retry 3 -o "$2" "$1" || die "download failed: $1" ;;
+    http://* | https://*)
+      if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 -o "$2" "$1" || die "download failed: $1"
+      elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$2" "$1" || die "download failed: $1"
+      else
+        die "neither curl nor wget is installed"
+      fi
+      ;;
     file://*) cp "${1#file://}" "$2" 2>/dev/null || die "not found: $1" ;;
     *) cp "$1" "$2" 2>/dev/null || die "not found: $1" ;;
   esac
+}
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{ print $1 }'; else shasum -a 256 "$1" | awk '{ print $1 }'; fi
 }
 
 if [ -n "${AUTOTRACK_BUNDLE:-}" ]; then
@@ -79,7 +109,7 @@ fetch "$src" "$tmp/$asset"
 fetch "$sums" "$tmp/SHA256SUMS"
 want=$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/SHA256SUMS")
 [ -n "$want" ] || die "SHA256SUMS has no line for $asset"
-got=$(shasum -a 256 "$tmp/$asset" | awk '{ print $1 }')
+got=$(sha256 "$tmp/$asset")
 [ "$got" = "$want" ] || die "checksum mismatch for $asset: got $got, want $want"
 say "Checksum ok"
 
@@ -100,8 +130,14 @@ if ! "$new/node/node" "$new/install/setup.mjs" --check; then
 fi
 [ "$step" = check ] && exit 0
 
-# Stop the running one: login item first, so nothing restarts it.
-if [ -n "$autostart" ]; then launchctl bootout "gui/$uid/$LABEL" 2>/dev/null || true; fi
+# Stop the running one: autostart first, so nothing restarts it.
+if [ -n "$autostart" ]; then
+  if [ "$os" = Darwin ]; then
+    launchctl bootout "gui/$uid/$LABEL" 2>/dev/null || true
+  elif [ -f "$unit" ]; then
+    systemctl --user stop "$SERVICE" 2>/dev/null || true
+  fi
+fi
 if [ -x "$app/bin/autotrack" ]; then AUTOTRACK_DIR="$data" "$app/bin/autotrack" stop >/dev/null 2>&1 || true; fi
 i=0
 while [ -f "$data/track.pid" ] && kill -0 "$(cat "$data/track.pid" 2>/dev/null || echo 0)" 2>/dev/null && [ $i -lt 20 ]; do
@@ -120,12 +156,18 @@ say "Installed $(cat "$app/VERSION") in $app"
 (umask 077 && "$node" "$app/install/setup.mjs") || die "setup failed"
 
 # The browser extension, unpacked at a stable path (Chrome and Edge reload unpacked extensions
-# from it on restart). Replaced on update. The manifest's fixed key keeps the extension id.
+# from it on restart). Replaced on update. The manifest's fixed key keeps the extension id. The
+# Linux bundle carries it unpacked too (unzip is not on every distro).
 ext="$data/extension"
 if [ "$STORE_LIVE" != 1 ]; then
   rm -rf "$data/extension.new"
-  mkdir "$data/extension.new"
-  if unzip -q "$app/extension.zip" -d "$data/extension.new" && [ -f "$data/extension.new/manifest.json" ]; then
+  if [ -f "$app/extension/manifest.json" ]; then
+    cp -R "$app/extension" "$data/extension.new"
+  else
+    mkdir "$data/extension.new"
+    unzip -q "$app/extension.zip" -d "$data/extension.new" 2>/dev/null || true
+  fi
+  if [ -f "$data/extension.new/manifest.json" ]; then
     rm -rf "$data/extension.old"
     [ -d "$ext" ] && mv "$ext" "$data/extension.old"
     mv "$data/extension.new" "$ext"
@@ -144,6 +186,190 @@ envline=""
 [ -n "${AUTOTRACK_DIR:-}" ] && envline="AUTOTRACK_DIR='$data' "
 printf '#!/bin/sh\n# autotrack CLI (written by install.sh)\n%sexec "%s" "$@"\n' "$envline" "$cli" >"$HOME/.local/bin/autotrack"
 chmod 755 "$HOME/.local/bin/autotrack"
+
+# ---- Linux ---------------------------------------------------------------------------------
+
+# A systemd value: % and $ doubled, the whole in double quotes with \ and " escaped.
+sd_quote() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g' -e 's/\$/$$/g')"; }
+# A desktop-entry Exec argument: double quotes with \ " ` $ escaped, % doubled.
+de_quote() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\\\\\/g' -e 's/"/\\"/g' -e 's/`/\\`/g' -e 's/\$/\\$/g' -e 's/%/%%/g')"; }
+
+running() { [ -f "$data/track.pid" ] && kill -0 "$(cat "$data/track.pid" 2>/dev/null || echo 0)" 2>/dev/null; }
+wayland() { [ "${XDG_SESSION_TYPE:-}" = wayland ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }
+
+linux_libs() { # the X libraries the input hook loads; a desktop has them, a minimal box may not
+  missing=""
+  for l in libX11.so.6 libXtst.so.6 libXt.so.6 libXrandr.so.2; do
+    if command -v ldconfig >/dev/null 2>&1; then
+      ldconfig -p 2>/dev/null | grep -q "$l" && continue
+    fi
+    for d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /lib/x86_64-linux-gnu; do
+      [ -e "$d/$l" ] && continue 2
+    done
+    missing="$missing $l"
+  done
+  if [ -n "$missing" ]; then
+    say ""
+    say "Warning: missing X libraries:$missing"
+    say "  Ubuntu, Debian: sudo apt install libx11-6 libxtst6 libxt6 libxrandr2"
+    say "  Fedora:         sudo dnf install libX11 libXtst libXt libXrandr"
+  fi
+}
+
+linux_autostart() {
+  rm -f "$desktop"
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet graphical-session.target 2>/dev/null; then
+    mkdir -p "$(dirname "$unit")"
+    {
+      printf '[Unit]\n'
+      printf 'Description=autotrack: records input and the screen around it\n'
+      printf 'PartOf=graphical-session.target\nAfter=graphical-session.target\n\n'
+      printf '[Service]\n'
+      printf 'ExecStart=%s %s start\n' "$(sd_quote "$node")" "$(sd_quote "$app/dist/cli.js")"
+      [ -n "${AUTOTRACK_DIR:-}" ] && printf 'Environment=%s\n' "$(sd_quote "AUTOTRACK_DIR=$data")"
+      printf 'Restart=on-failure\nRestartSec=30\n\n'
+      printf '[Install]\nWantedBy=graphical-session.target\n'
+    } >"$unit"
+    systemctl --user daemon-reload
+    systemctl --user import-environment DISPLAY XAUTHORITY 2>/dev/null || true
+    systemctl --user enable "$SERVICE" >/dev/null 2>&1 || die "systemctl could not enable $unit"
+    say "Login service $unit"
+    systemctl --user restart "$SERVICE" || die "systemctl could not start $SERVICE"
+  else
+    # No systemd user session (or no graphical-session.target): the XDG autostart entry, and
+    # started now, detached from this shell.
+    if [ -f "$unit" ]; then
+      systemctl --user disable --now "$SERVICE" >/dev/null 2>&1 || true
+      rm -f "$unit"
+    fi
+    mkdir -p "$(dirname "$desktop")"
+    exec_line="$(de_quote "$node") $(de_quote "$app/dist/cli.js") start"
+    [ -n "${AUTOTRACK_DIR:-}" ] && exec_line="env $(de_quote "AUTOTRACK_DIR=$data") $exec_line"
+    {
+      printf '[Desktop Entry]\nType=Application\nName=autotrack\n'
+      printf 'Comment=Records input and the screen around it\n'
+      printf 'Exec=%s\n' "$exec_line"
+      printf 'Terminal=false\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n'
+    } >"$desktop"
+    say "Login item $desktop"
+    if [ -n "${DISPLAY:-}" ]; then
+      if command -v setsid >/dev/null 2>&1; then
+        AUTOTRACK_DIR="$data" setsid "$node" "$app/dist/cli.js" start >>"$data/autostart.log" 2>&1 </dev/null &
+      else
+        AUTOTRACK_DIR="$data" nohup "$node" "$app/dist/cli.js" start >>"$data/autostart.log" 2>&1 </dev/null &
+      fi
+    fi
+  fi
+  if [ ! -f "$unit" ] && [ -z "${DISPLAY:-}" ]; then
+    say "No X display in this shell: autotrack starts at your next desktop login."
+    return
+  fi
+  i=0
+  until running; do
+    i=$((i + 1))
+    [ $i -lt 30 ] && sleep 0.5 || break
+  done
+  running && say "Started" || say "Warning: autotrack did not start yet; see $data/track.log"
+}
+
+# Browsers on PATH, as "<command> <label> <scheme>".
+linux_browsers() {
+  seen=""
+  for b in "google-chrome-stable|Google Chrome|chrome" "google-chrome|Google Chrome|chrome" \
+    "chromium|Chromium|chrome" "chromium-browser|Chromium|chrome" \
+    "microsoft-edge-stable|Microsoft Edge|edge" "microsoft-edge|Microsoft Edge|edge" \
+    "brave-browser|Brave|brave" "brave|Brave|brave"; do
+    cmd=${b%%|*}
+    rest=${b#*|}
+    label=${rest%%|*}
+    command -v "$cmd" >/dev/null 2>&1 || continue
+    case "|$seen|" in *"|$label|"*) continue ;; esac
+    seen="$seen|$label"
+    printf '%s|%s\n' "$b" ""
+  done
+}
+
+copy_text() { # to the clipboard: X11, then Wayland
+  if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null 2>&1; then
+    printf '%s' "$1" | wl-copy 2>/dev/null && return 0
+  fi
+  if command -v xclip >/dev/null 2>&1; then
+    printf '%s' "$1" | xclip -selection clipboard 2>/dev/null && return 0
+  fi
+  if command -v xsel >/dev/null 2>&1; then
+    printf '%s' "$1" | xsel --clipboard --input 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+linux_extension_help() {
+  say ""
+  if [ "$STORE_LIVE" = 1 ]; then
+    say "Browser clicks: add the autotrack extension to Chrome, Edge or Brave: $STORE_URL"
+    return
+  fi
+  [ -n "$ext" ] || return 0
+  say "Browser clicks: load the autotrack extension in Chrome, Chromium, Edge or Brave."
+  say "Folder: $ext"
+  found=""
+  [ -n "${AUTOTRACK_NO_BROWSER:-}" ] || found=$(linux_browsers)
+  if [ -z "$found" ]; then
+    say "Open chrome://extensions (or edge://, brave://), turn on Developer mode, Load unpacked, pick that folder."
+    return
+  fi
+  copy_text "$ext" && say "(Copied to your clipboard.)"
+  printf '%s\n' "$found" | while IFS='|' read -r cmd label scheme _; do
+    say ""
+    say "$label:"
+    say "  1. Open $scheme://extensions and turn on Developer mode (top right)."
+    say "  2. Click Load unpacked."
+    say "  3. Press Ctrl+L, paste the folder (already copied), press Enter, then Select."
+    # chrome:// is not a URL xdg-open can hand over: the browser itself opens it, as a new tab
+    # when it is running.
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "$cmd" "$scheme://extensions" >/dev/null 2>&1 </dev/null &
+    else
+      nohup "$cmd" "$scheme://extensions" >/dev/null 2>&1 </dev/null &
+    fi
+  done
+  say ""
+  say "If autotrack is already listed there, press its reload button instead."
+}
+
+if [ "$os" = Linux ]; then
+  linux_libs
+  if [ -z "$autostart" ]; then
+    say "AUTOTRACK_NO_AUTOSTART set: not starting it."
+    linux_extension_help
+    say "Done."
+    exit 0
+  fi
+  linux_autostart
+  if wayland; then
+    say ""
+    say "This is a Wayland session. autotrack sees only XWayland apps there: most input, windows"
+    say "and screen are missed. For full recording, log out, pick the Xorg session (the gear icon"
+    say "on the login screen), and log in again."
+  fi
+  say ""
+  say "Checking (about 15 seconds)..."
+  AUTOTRACK_DIR="$data" "$cli" doctor 2>&1 || true
+  say ""
+  if running; then
+    say "autotrack is recording."
+  elif [ ! -f "$unit" ] && [ -z "${DISPLAY:-}" ]; then
+    say "NOT DONE: no X display here. Log in to the desktop; autotrack starts then."
+  else
+    say "NOT DONE: autotrack is not running. See $data/track.log, then run: autotrack start"
+  fi
+  say "Pause or resume: Ctrl+Alt+Shift+P (a notification says which)."
+  say "Status: autotrack status    Uninstall: autotrack uninstall"
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) say "(autotrack is in ~/.local/bin, not on your PATH: run \"$cli\" instead.)" ;; esac
+  linux_extension_help
+  exit 0
+fi
+
+# ---- Mac -----------------------------------------------------------------------------------
 
 xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 

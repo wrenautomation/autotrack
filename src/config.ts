@@ -98,7 +98,7 @@ export function dataDir(
   if (platform === "win32")
     return join(env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "autotrack");
   if (platform === "darwin") return join(homedir(), "Library", "Application Support", "autotrack");
-  return join(env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "autotrack");
+  return join(env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "autotrack");
 }
 
 export const sessionsDir = (data: string) => nativeJoin(data, "sessions");

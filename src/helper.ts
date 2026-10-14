@@ -1,5 +1,6 @@
 /**
- * Client for a native helper child (helpers/mac/probe, helpers/win/autotrack-helper.exe): a long-lived
+ * Client for a native helper child (helpers/mac/probe, helpers/win/autotrack-helper.exe,
+ * helpers/linux/autotrack-helper): a long-lived
  * process, one JSON request per line on stdin, one answer per line on stdout, matched by id. An
  * answer that misses its timeout resolves `null` and is dropped by id when it shows up late. A
  * line with `event` and no id is something the helper saw by itself (a clipboard change) and goes
@@ -46,10 +47,12 @@ export function helperCommand(
       ? join(root, "helpers", "mac", "probe")
       : platform === "win32"
         ? join(root, "helpers", "win", "autotrack-helper.exe")
-        : null;
+        : platform === "linux"
+          ? join(root, "helpers", "linux", "autotrack-helper")
+          : null;
   if (!path || !existsSync(path)) return null;
-  // The Mac probe's own mode is the default; the Windows exe takes it named.
-  const args = mode === "probe" ? (platform === "win32" ? ["--probe"] : []) : [`--${mode}`];
+  // The Mac probe's own mode is the default; the Windows and Linux helpers take it named.
+  const args = mode === "probe" ? (platform === "darwin" ? [] : ["--probe"]) : [`--${mode}`];
   return { cmd: path, args, path };
 }
 

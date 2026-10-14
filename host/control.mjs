@@ -14,7 +14,7 @@ export function dataDir(env = process.env, platform = process.platform, home = h
   if (platform === "win32")
     return join(env.LOCALAPPDATA ?? join(home, "AppData", "Local"), "autotrack");
   if (platform === "darwin") return join(home, "Library", "Application Support", "autotrack");
-  return join(env.XDG_DATA_HOME ?? join(home, ".local", "share"), "autotrack");
+  return join(env.XDG_DATA_HOME || join(home, ".local", "share"), "autotrack");
 }
 
 /** Mac/Linux: `<data>/control.sock`, or a tmpdir path when that is too long for a unix socket. Windows: a named pipe. */

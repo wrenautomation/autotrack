@@ -34,6 +34,12 @@ export interface PermAnswer {
   accessibility: boolean;
   screen: boolean;
   input: boolean;
+  /** Linux: `x11`, `wayland`, … */
+  session?: string;
+  /** Linux: the AT-SPI bus answered. */
+  atspi?: boolean;
+  /** Linux: the X server has XRecord (uiohook's input source). */
+  record?: boolean;
 }
 
 /** One node of the front window's tree: never a value; `secure` marks a password field. */
@@ -104,7 +110,7 @@ export class Probe extends HelperClient {
   perm(timeoutMs = 2000): Promise<PermAnswer | null> {
     return this.call("perm", {}, timeoutMs);
   }
-  /** Windows: `GetSystemPowerStatus` as `{ac, battery}` (null when unknown). */
+  /** Windows: `GetSystemPowerStatus` as `{ac, battery}` (null when unknown). Linux: sysfs. */
   power(timeoutMs = 2000): Promise<{ ac: boolean | null; battery: number | null } | null> {
     return this.call("power", {}, timeoutMs);
   }

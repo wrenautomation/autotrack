@@ -184,7 +184,7 @@ describe("probe client", () => {
 });
 
 describe("helperCommand", () => {
-  it("Windows: the compiled exe, its mode named; Mac: the probe, probe mode by default", () => {
+  it("Windows and Linux: the helper, its mode named; Mac: the probe, probe mode by default", () => {
     const root = mkdtempSync(join(tmpdir(), "autotrack-helper-"));
     try {
       expect(helperCommand("win32", root)).toBeNull();
@@ -199,6 +199,12 @@ describe("helperCommand", () => {
       expect(helperCommand("darwin", root)?.args).toEqual([]);
       expect(helperCommand("darwin", root, "shots")?.args).toEqual(["--shots"]);
       expect(helperCommand("linux", root)).toBeNull();
+      mkdirSync(join(root, "helpers", "linux"), { recursive: true });
+      const bin = join(root, "helpers", "linux", "autotrack-helper");
+      writeFileSync(bin, "");
+      expect(helperCommand("linux", root)).toEqual({ cmd: bin, args: ["--probe"], path: bin });
+      expect(helperCommand("linux", root, "ocr")?.args).toEqual(["--ocr"]);
+      expect(helperCommand("freebsd", root)).toBeNull();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

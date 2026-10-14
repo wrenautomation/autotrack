@@ -15,6 +15,7 @@ import type { Level } from "./events.ts";
 import { HelperClient, helperCommand, spawnHelper } from "./helper.ts";
 import { readStats, unread } from "./journal.ts";
 import type { Power } from "./level.ts";
+import { onPath } from "./linux.ts";
 import { redactSecrets } from "./privacy.ts";
 
 export const OCR_IDLE_MS = 20_000;
@@ -372,10 +373,21 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
   });
 }
 
-/** One run of the `--ocr` helper for this OS; null when the helper is missing. */
-export function ocrHelper(log?: (msg: string) => void): (() => OcrReader) | null {
-  const cmd = helperCommand(process.platform, undefined, "ocr");
+/**
+ * One run of the `--ocr` helper for this OS; null when the helper is missing, or on Linux when
+ * tesseract is not installed (images then go unread and count as skipped).
+ */
+export function ocrHelper(
+  log?: (msg: string) => void,
+  platform: NodeJS.Platform = process.platform,
+  has: (cmd: string) => boolean = (c) => !!onPath(c),
+): (() => OcrReader) | null {
+  const cmd = helperCommand(platform, undefined, "ocr");
   if (!cmd) return null;
+  if (platform === "linux" && !has("tesseract")) {
+    log?.("ocr off: tesseract not installed");
+    return null;
+  }
   return () => {
     const c = new HelperClient({
       spawn: spawnHelper(cmd),

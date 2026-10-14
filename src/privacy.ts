@@ -106,6 +106,7 @@ export const DEFAULT_EXCLUDED_APPS = [
   "Passwords",
   "KeePass",
   "KeePassXC",
+  "Seahorse",
 ];
 export const DEFAULT_EXCLUDED_TITLES = ["bank|chase|wells fargo|paypal"];
 
@@ -119,7 +120,8 @@ export function appMatches(app: App, entry: string): boolean {
   return norm(app.name) === e || id.endsWith(e) || id.endsWith(`${e}exe`);
 }
 
-const LOCK_APPS = ["loginwindow", "ScreenSaverEngine", "LockApp", "LogonUI"];
+// Linux: the helper answers app "lockscreen" while the screensaver or lock is up.
+const LOCK_APPS = ["loginwindow", "ScreenSaverEngine", "LockApp", "LogonUI", "lockscreen"];
 
 export interface Gate {
   excludeApps: string[];

@@ -13,13 +13,15 @@
  *   dist/                    tsc output, tests left out
  *   node_modules/            production deps, hoisted (no symlinks), this platform only
  *   helpers/mac/probe        universal binary (Mac) | helpers/win/autotrack-helper.exe (Windows,
- *                            C# for .NET Framework 4.8, built by helpers/win/build.ps1)
+ *                            C# for .NET Framework 4.8, built by helpers/win/build.ps1) |
+ *                            helpers/linux/autotrack-helper (Linux, static musl Rust, built by
+ *                            helpers/linux/build.sh)
  *   host/*.mjs               native messaging host for the browser extension
  *   install/setup.mjs        config.json + browser host, run by install.sh / install.ps1
  *   install/perm.mjs         Mac: asks the probe which permissions node holds
  *   extension.zip            the browser extension with its manifest `key`; the installers unpack
  *                            it to <data>/extension (the Web Store zip is `pnpm zip` in extension/)
- *   autotrack.cmd (Windows) | bin/autotrack (Mac)    the CLI
+ *   autotrack.cmd (Windows) | bin/autotrack (Mac, Linux)    the CLI
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -45,6 +47,7 @@ export const NODE_SHA256 = {
   "darwin-arm64": "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057",
   "darwin-x64": "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097",
   "win32-x64": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
+  "linux-x64": "6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff",
 };
 export const TARGETS = Object.keys(NODE_SHA256);
 
@@ -163,6 +166,16 @@ function files(dir, base = dir) {
 const EXTENSION_SKIP =
   /(^|[\\/])(node_modules|test|scripts|\.[^\\/]+)([\\/]|$)|^(package\.json|pnpm-lock\.yaml|tsconfig.*|vitest.*)$|\.md$|\.test\./;
 
+/** bin/autotrack: the CLI on the bundled node (Mac, Linux). */
+function writeBin(stage) {
+  mkdirSync(join(stage, "bin"), { recursive: true });
+  writeFileSync(
+    join(stage, "bin", "autotrack"),
+    '#!/bin/sh\n# The autotrack CLI on the bundled node.\napp=$(cd "$(dirname "$0")/.." && pwd -P)\nexec "$app/node/node" "$app/dist/cli.js" "$@"\n',
+  );
+  chmodSync(join(stage, "bin", "autotrack"), 0o755);
+}
+
 function zip(out, cwd, entries) {
   rmSync(out, { force: true });
   run(TAR, ["--format", "zip", "-cf", out, "-C", cwd, ...entries], {
@@ -228,13 +241,17 @@ async function main() {
       }
       if (!existsSync(join(stage, "helpers", "mac", "probe")))
         throw new Error("helpers/mac/probe not built");
-      mkdirSync(join(stage, "bin"), { recursive: true });
-      writeFileSync(
-        join(stage, "bin", "autotrack"),
-        '#!/bin/sh\n# The autotrack CLI on the bundled node.\napp=$(cd "$(dirname "$0")/.." && pwd -P)\nexec "$app/node/node" "$app/dist/cli.js" "$@"\n',
-      );
-      chmodSync(join(stage, "bin", "autotrack"), 0o755);
+      writeBin(stage);
       cpSync(join(ROOT, "install", "perm.mjs"), join(stage, "install", "perm.mjs"));
+    } else if (os === "linux") {
+      // Needs cargo with the x86_64-unknown-linux-musl target.
+      const bin = join(ROOT, "helpers", "linux", "autotrack-helper");
+      run("sh", [join(ROOT, "helpers", "linux", "build.sh")]);
+      if (!existsSync(bin)) throw new Error("helpers/linux/autotrack-helper not built");
+      mkdirSync(join(stage, "helpers", "linux"), { recursive: true });
+      cpSync(bin, join(stage, "helpers", "linux", "autotrack-helper"));
+      chmodSync(join(stage, "helpers", "linux", "autotrack-helper"), 0o755);
+      writeBin(stage);
     } else {
       const exe = join(ROOT, "helpers", "win", "autotrack-helper.exe");
       run("powershell.exe", [
@@ -263,6 +280,12 @@ async function main() {
     if (!extFiles.includes("manifest.json")) throw new Error("extension/manifest.json missing");
     zip(join(stage, "extension.zip"), ext, extFiles);
     cpSync(join(stage, "extension.zip"), join(out, "autotrack-extension.zip"));
+    // Linux: unpacked too, since unzip is not on every distro.
+    if (os === "linux")
+      for (const f of extFiles) {
+        mkdirSync(dirname(join(stage, "extension", f)), { recursive: true });
+        cpSync(join(ext, f), join(stage, "extension", f));
+      }
 
     writeFileSync(join(stage, "VERSION"), `${version}\n`);
 

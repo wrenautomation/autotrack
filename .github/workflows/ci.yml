@@ -91,14 +91,56 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # Linux: a throwaway X11 desktop (Xvfb with RECORD, openbox, AT-SPI under dbus-run-session), GTK
+  # fixtures driven by xdotool. Fails over the active budget (6% CPU over the 10 s burst, 200 MB).
+  e2e-linux:
+    name: e2e ubuntu-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: desktop packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends xvfb x11-utils openbox dbus dbus-x11 \
+            at-spi2-core libatk-adaptor libgtk-3-0 gir1.2-gtk-3.0 python3-gi xdotool xclip zenity \
+            tesseract-ocr tesseract-ocr-eng libnotify-bin libxtst6 libxt6 libxrandr2 musl-tools
+      - name: rust musl target
+        run: rustup target add x86_64-unknown-linux-musl
+      - name: helper unit tests
+        working-directory: helpers/linux
+        run: cargo test --locked
+      - name: build the helper
+        run: sh helpers/linux/build.sh
+      - run: pnpm install --frozen-lockfile
+      - name: helper tests
+        run: dbus-run-session -- sh test/e2e/linux-x.sh node helpers/linux/test.mjs
+      - name: bundle
+        run: node scripts/bundle.mjs
+      - name: install, drive input, ship, check, uninstall
+        run: dbus-run-session -- sh test/e2e/linux-x.sh sh test/e2e/linux.sh
+      - name: logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-ubuntu-latest
+          path: ${{ runner.temp }}/autotrack-e2e
+          if-no-files-found: ignore
+          retention-days: 7
+
   # The double-click installers, built from the just-built bundle and run silently on each OS:
-  # install, doctor, upgrade over it, uninstall. Also parse-checks the PowerShell scripts.
+  # install, doctor, upgrade over it, uninstall. Also parse-checks the PowerShell and shell scripts.
   installers:
     name: installer ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -127,7 +169,21 @@ jobs:
       - name: shell scripts parse (mac)
         if: runner.os == 'macOS'
         run: for f in install/install.sh installer/mac/build.sh installer/mac/smoke.sh installer/mac/autotrack-installer; do sh -n "$f"; done
+      - name: shell scripts parse and lint (linux)
+        if: runner.os == 'Linux'
+        run: |
+          for f in install/install.sh installer/linux/build.sh installer/linux/smoke.sh installer/linux/autotrack-installer test/e2e/linux.sh test/e2e/linux-x.sh; do sh -n "$f"; done
+          shellcheck -s sh -S error install/install.sh installer/linux/*.sh installer/linux/autotrack-installer test/e2e/linux.sh test/e2e/linux-x.sh
+      - name: rust musl target (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y -q musl-tools && rustup target add x86_64-unknown-linux-musl
       - run: node scripts/bundle.mjs
+      - name: build the installer (linux)
+        if: runner.os == 'Linux'
+        run: sh installer/linux/build.sh
+      - name: install, doctor, upgrade, uninstall (linux)
+        if: runner.os == 'Linux'
+        run: sh installer/linux/smoke.sh "installer/linux/out/autotrack-${{ steps.v.outputs.version }}-linux-x64.run" "${{ steps.v.outputs.version }}"
       - name: build the installer (windows)
         if: runner.os == 'Windows'
         shell: cmd
@@ -151,5 +207,6 @@ jobs:
             ${{ runner.temp }}/autotrack-installer-smoke
             installer/windows/out/*.exe
             installer/mac/out/*.dmg
+            installer/linux/out/*.run
           if-no-files-found: ignore
           retention-days: 3

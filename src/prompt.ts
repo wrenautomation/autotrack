@@ -1,10 +1,12 @@
 /**
  * The task marker's one-line prompt ("What are you doing?"), opened in front: Mac `display
  * dialog` run by System Events (osascript itself may not take the front from a background
- * process), Windows a small topmost WinForms box with OK and Cancel. Resolves the answer, "" for an empty OK, or
+ * process), Windows a small topmost WinForms box with OK and Cancel, Linux `zenity --entry`, else
+ * `kdialog --inputbox`. Resolves the answer, "" for an empty OK, or
  * null for Cancel, a closed box, no prompt on this OS, or 10 minutes without an answer.
  */
 import { spawn } from "node:child_process";
+import { onPath } from "./linux.ts";
 
 export const PROMPT_TIMEOUT_MS = 10 * 60_000;
 
@@ -15,6 +17,7 @@ const ps = (s: string) => s.replace(/'/g, "''");
 export function promptCommand(
   question: string,
   platform: NodeJS.Platform = process.platform,
+  has: (cmd: string) => boolean = (c) => !!onPath(c),
 ): { cmd: string; args: string[] } | null {
   if (platform === "darwin") {
     const script = [
@@ -58,6 +61,21 @@ exit 1
         Buffer.from(script, "utf16le").toString("base64"),
       ],
     };
+  }
+  if (platform === "linux") {
+    if (has("zenity"))
+      return {
+        cmd: "zenity",
+        args: [
+          "--entry",
+          "--title=autotrack",
+          `--text=${question}`,
+          `--timeout=${PROMPT_TIMEOUT_MS / 1000}`,
+          "--width=380",
+        ],
+      };
+    if (has("kdialog"))
+      return { cmd: "kdialog", args: ["--title", "autotrack", "--inputbox", question, ""] };
   }
   return null;
 }

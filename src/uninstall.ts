@@ -1,6 +1,7 @@
 /**
- * `autotrack uninstall`: undo what install.sh / install.ps1 did. Autostart off (LaunchAgent, or
- * the Scheduled Task and its Run-key fallback), the recorder stopped, the browser host
+ * `autotrack uninstall`: undo what install.sh / install.ps1 did. Autostart off (LaunchAgent, the
+ * Scheduled Task and its Run-key fallback, or the systemd user unit and its XDG autostart
+ * fallback), the recorder stopped, the browser host
  * unregistered, one last ship, then the app and config removed. Unshipped segments are deleted
  * only after a yes (or `--yes`); a no keeps `sessions/` and nothing else.
  */
@@ -8,6 +9,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { autostartFile, configHome, SERVICE, serviceFile } from "./linux.ts";
 import { countSegments, dirBytes, type ShipResult } from "./ship.ts";
 
 export const AGENT_LABEL = "com.wrenautomation.autotrack";
@@ -18,6 +20,8 @@ export interface UninstallDeps {
   platform: NodeJS.Platform;
   data: string;
   home?: string;
+  /** Linux: the XDG config dir; `~/.config` by default. */
+  config?: string;
   uid?: number;
   yes: boolean;
   /** Runs a command; resolves with its exit code, never rejects. */
@@ -65,6 +69,15 @@ export async function uninstall(d: UninstallDeps): Promise<number> {
       { ...process.env, AUTOTRACK_APP: app },
     );
     d.log("scheduled task removed");
+  } else if (d.platform === "linux") {
+    const config = d.config ?? configHome(home);
+    if (existsSync(serviceFile(config))) {
+      await d.run("systemctl", ["--user", "disable", "--now", SERVICE]);
+      rmSync(serviceFile(config), { force: true });
+      await d.run("systemctl", ["--user", "daemon-reload"]);
+    }
+    rmSync(autostartFile(config), { force: true });
+    d.log("autostart removed");
   }
 
   // 2. Stop it; closing the session closes its last segment.
@@ -94,7 +107,7 @@ export async function uninstall(d: UninstallDeps): Promise<number> {
   }
 
   // 5. Remove the rest.
-  if (d.platform === "darwin") {
+  if (d.platform !== "win32") {
     const shim = join(home, ".local", "bin", "autotrack"); // written by install.sh
     try {
       if (readFileSync(shim, "utf8").includes(app)) rmSync(shim);

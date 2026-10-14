@@ -701,9 +701,11 @@ Decisions:
     it and checks it still has `FOCUSED`, so a stale answer cannot hide a password field. Without
     an event, it falls back to `Collection.GetMatches` on the active frame, then a bounded walk.
   - `secure` = role `password text` (GTK, Qt, Chromium and Firefox all use it).
-  - Names: text roles (`text`, `entry`, `password text`, `terminal`, `combo box`, `document *`) take
-    their name only from their label (`LABELLED_BY`), so their text is never read. Other roles drop
-    a name that shows their `Value` (the Windows rule), then fall back to the label.
+  - Names (`name.rs`, the Windows `SafeName` rule): `document *` takes only its label
+    (`LABELLED_BY`). `password text` takes its label, else its name; its text is never read. Text
+    roles (`text`, `entry`, `terminal`, `combo box`, `editbar`, `autocomplete`) and value roles
+    (spin button, slider, scroll bar, progress bar, dial, level bar) drop a name that shows their
+    text or `Value`, then fall back to the label unless it shows it too.
   - `front`: `_NET_ACTIVE_WINDOW`, `_NET_WM_PID`. `app.id` = `/proc/<pid>/exe`. `app.name` = the
     `WM_CLASS` class, else `comm`. The title comes from `_NET_WM_NAME`, and the bounds include
     `_NET_FRAME_EXTENTS`. `dialog`: window type `DIALOG` or state `MODAL`, with words from its
@@ -756,8 +758,9 @@ anything, then runs `install.sh`. `--uninstall` runs `autotrack uninstall`.
 - No UI (CI): `AUTOTRACK=<code>` or `AUTOTRACK_CODE_FILE=<path>` in the environment. No dialogs.
 
 install.sh (the one-liner) handles Linux too. It checks with `sha256sum`, then writes the shim,
-the autostart and the browser hosts. Browser steps open with `xdg-open`, and the folder is copied
-with `xclip` or `wl-copy` when one is there. It runs `doctor` and prints the Wayland fix when that
+the autostart and the browser hosts. Browser steps open `<scheme>://extensions` in each browser
+found, started directly (`xdg-open` can't open `chrome://`), and the folder is copied with
+`wl-copy`, `xclip` or `xsel` when one is there. It runs `doctor` and prints the Wayland fix when that
 applies.
 
 Tests: unit tests for the Linux pieces (power, busy, autostart, uninstall, host paths, notify,

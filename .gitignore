@@ -10,3 +10,6 @@ dist/
 
 # Built by scripts/bundle.mjs
 bundles/
+
+# Built by installer/*/build.*
+installer/*/out/

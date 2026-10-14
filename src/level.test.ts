@@ -219,11 +219,13 @@ describe("system readings", () => {
     expect(powerOf(null)).toBeNull();
   });
 
-  it("Mac: busy over 0.85 load per core", () => {
-    const b = busyMeter("darwin", { load: () => 7, cores: () => 8 });
-    expect(b()).toEqual({ busy: true, why: "load 0.88 per core" });
-    const c = busyMeter("darwin", { load: () => 2, cores: () => 8 });
-    expect(c()?.busy).toBe(false);
+  it("Mac and Linux: busy over 0.85 load per core", () => {
+    for (const os of ["darwin", "linux"] as const) {
+      const b = busyMeter(os, { load: () => 7, cores: () => 8 });
+      expect(b()).toEqual({ busy: true, why: "load 0.88 per core" });
+      const c = busyMeter(os, { load: () => 2, cores: () => 8 });
+      expect(c()?.busy).toBe(false);
+    }
   });
 
   it("Windows: busy under 15% idle over 60 s, null until the window is covered", () => {

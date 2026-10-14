@@ -1,7 +1,8 @@
 /**
- * Registers the native messaging host with Chrome and Edge for this user (no admin).
+ * Registers the native messaging host with Chrome and Edge (and on Linux Chromium and Brave) for
+ * this user (no admin).
  *
- * Mac: a manifest JSON in each browser's per-user `NativeMessagingHosts/` dir, pointing at a
+ * Mac and Linux: a manifest JSON in each browser's per-user `NativeMessagingHosts/` dir, pointing at a
  * `/bin/sh` wrapper that runs the bundled node on autotrack-host.mjs (a browser started from the
  * Dock has no node on PATH). Windows: one manifest file plus `HKCU\Software\<browser>\
  * NativeMessagingHosts\com.wrenautomation.autotrack` whose default value is its path, set with
@@ -41,7 +42,7 @@ const REG = {
 };
 
 /**
- * Where each browser looks. Mac: `{browser, dir}` (manifest file goes in dir). Windows:
+ * Where each browser looks. Mac, Linux: `{browser, dir}` (manifest file goes in dir). Windows:
  * `{browser, regKey}`.
  */
 export function targets(platform = process.platform, home = homedir()) {
@@ -57,7 +58,19 @@ export function targets(platform = process.platform, home = homedir()) {
       { browser: "chrome", regKey: REG.chrome },
       { browser: "edge", regKey: REG.edge },
     ];
-  throw new Error(`autotrack's browser host supports Mac and Windows, not ${platform}`);
+  if (platform === "linux") {
+    const config = posix.join(home, ".config");
+    return [
+      { browser: "chrome", dir: posix.join(config, "google-chrome", "NativeMessagingHosts") },
+      { browser: "chromium", dir: posix.join(config, "chromium", "NativeMessagingHosts") },
+      { browser: "edge", dir: posix.join(config, "microsoft-edge", "NativeMessagingHosts") },
+      {
+        browser: "brave",
+        dir: posix.join(config, "BraveSoftware", "Brave-Browser", "NativeMessagingHosts"),
+      },
+    ];
+  }
+  throw new Error(`autotrack's browser host supports Mac, Windows and Linux, not ${platform}`);
 }
 
 /** The host manifest Chrome and Edge read. */

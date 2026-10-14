@@ -1,0 +1,177 @@
+#!/bin/sh
+# autotrack installer for Linux (x86_64): this script with install.sh and the Linux bundle appended
+# as a tar.gz. It asks for the install code (zenity, else kdialog, else the terminal), then runs
+# install.sh against the bundle it carries, as you: no sudo, nothing outside your home.
+#
+#   sh autotrack-<version>-linux-x64.run               install or update
+#   sh autotrack-<version>-linux-x64.run --uninstall   remove it (--yes: also unshipped data)
+#
+# No questions: with the code in AUTOTRACK, or in the file AUTOTRACK_CODE_FILE names, nothing is
+# asked and the output goes to stdout. The exit code is install.sh's. For CI:
+#   AUTOTRACK=<code> AUTOTRACK_NO_AUTOSTART=1 AUTOTRACK_NO_BROWSER=1 sh autotrack-<version>-linux-x64.run
+set -u
+
+say() { printf '%s\n' "$*"; }
+die() {
+  printf 'autotrack installer: %s\n' "$*" >&2
+  exit 1
+}
+[ "$(uname -s)" = Linux ] || die "this installer is for Linux"
+
+self=$0
+case $self in /*) ;; *) self="$PWD/$self" ;; esac
+data=${AUTOTRACK_DIR:-"${XDG_DATA_HOME:-$HOME/.local/share}/autotrack"}
+
+case ${1:-} in
+  --uninstall)
+    shift
+    cli="$data/app/bin/autotrack"
+    [ -x "$cli" ] || die "autotrack is not installed in $data"
+    AUTOTRACK_DIR="$data" "$cli" uninstall "$@"
+    exit $?
+    ;;
+  -h | --help)
+    sed -n '2,12p' "$self" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  "") ;;
+  *) die "unknown option $1 (try --help)" ;;
+esac
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 130' INT TERM
+skip=$(awk '/^__AUTOTRACK_PAYLOAD__$/ { print NR + 1; exit }' "$self")
+[ -n "$skip" ] || die "no payload in $self (a broken download?)"
+tail -n +"$skip" "$self" | tar -xzf - -C "$tmp" || die "could not unpack $self (a broken download?)"
+[ -f "$tmp/install.sh" ] || die "no install.sh in $self"
+bundles="$tmp/bundles"
+
+code=${AUTOTRACK:-}
+if [ -z "$code" ] && [ -n "${AUTOTRACK_CODE_FILE:-}" ]; then
+  code=$(tr -d ' \t\r\n' <"$AUTOTRACK_CODE_FILE") || code=""
+fi
+if [ -n "$code" ]; then
+  AUTOTRACK="$code" AUTOTRACK_BUNDLE="$bundles" sh "$tmp/install.sh"
+  exit $?
+fi
+
+# How to ask: a dialog in a desktop session, else this terminal.
+ui=""
+if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+  if command -v zenity >/dev/null 2>&1; then
+    ui=zenity
+  elif command -v kdialog >/dev/null 2>&1; then
+    ui=kdialog
+  fi
+fi
+if [ -z "$ui" ]; then
+  [ -t 0 ] || die "no install code: set AUTOTRACK, or run this from a terminal or a desktop session"
+  ui=tty
+fi
+
+# zenity reads Pango markup: & < > must be entities.
+markup() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+ask() { # <default> <message>: prints the answer; non-zero on Cancel
+  case $ui in
+    zenity) zenity --entry --title=autotrack --width=480 --ok-label=Install --text="$(markup "$2")" --entry-text="$1" 2>/dev/null ;;
+    kdialog) kdialog --title autotrack --inputbox "$2" "$1" 2>/dev/null ;;
+    tty)
+      printf '\n%s\n> ' "$2" >&2
+      read -r a || return 1
+      [ -n "$a" ] || a=$1
+      printf '%s\n' "$a"
+      ;;
+  esac
+}
+tell() { # <info|error> <message>
+  case $ui in
+    zenity) zenity "--$1" --title=autotrack --width=480 --text="$(markup "$2")" 2>/dev/null || true ;;
+    kdialog) if [ "$1" = error ]; then kdialog --title autotrack --error "$2" 2>/dev/null || true; else kdialog --title autotrack --msgbox "$2" 2>/dev/null || true; fi ;;
+    tty) printf '\n%s\n' "$2" ;;
+  esac
+}
+
+# A code is long base64url text; if one is on the clipboard, offer it.
+default=""
+if [ "$ui" != tty ]; then
+  if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-paste >/dev/null 2>&1; then
+    default=$(wl-paste --no-newline 2>/dev/null | head -c 4000 | tr -d ' \t\r\n') || default=""
+  elif command -v xclip >/dev/null 2>&1; then
+    default=$(timeout 2 xclip -o -selection clipboard 2>/dev/null | head -c 4000 | tr -d ' \t\r\n') || default=""
+  fi
+  case $default in *[!A-Za-z0-9_-]*) default="" ;; esac
+  [ "${#default}" -ge 40 ] || default=""
+fi
+
+msg="Paste the install code for this computer.
+
+You get it from: autobrowse autotrack enroll <device>
+
+autotrack installs for you only. No administrator password."
+while :; do
+  answer=$(ask "$default" "$msg") || exit 0
+  code=$(printf '%s' "$answer" | tr -d ' \t\r\n')
+  [ -n "$code" ] || { msg="Paste the install code."; continue; }
+  if out=$(AUTOTRACK="$code" AUTOTRACK_STEP=check AUTOTRACK_BUNDLE="$bundles" sh "$tmp/install.sh" 2>&1); then
+    break
+  fi
+  default=$code
+  msg="That install code did not work.
+
+$(printf '%s\n' "$out" | tail -3)
+
+Paste it again."
+done
+
+if [ "$ui" = tty ]; then
+  AUTOTRACK="$code" AUTOTRACK_BUNDLE="$bundles" sh "$tmp/install.sh"
+  exit $?
+fi
+
+logdir=${XDG_STATE_HOME:-$HOME/.local/state}
+mkdir -p "$logdir"
+log="$logdir/autotrack-installer.log"
+(
+  AUTOTRACK="$code" AUTOTRACK_BUNDLE="$bundles" sh "$tmp/install.sh" >"$log" 2>&1
+  echo $? >"$tmp/rc"
+) &
+pid=$!
+if [ "$ui" = zenity ]; then
+  (
+    while kill -0 "$pid" 2>/dev/null; do
+      echo "# Installing and checking autotrack (about 30 seconds)..."
+      sleep 1
+    done
+    echo 100
+  ) | zenity --progress --pulsate --auto-close --no-cancel --title=autotrack --width=420 2>/dev/null || true
+fi
+wait "$pid"
+rc=$(cat "$tmp/rc" 2>/dev/null || echo 1)
+
+if [ "$rc" = 0 ] && grep -q '^autotrack is recording\.' "$log"; then
+  note=""
+  grep -q 'This is a Wayland session' "$log" && note="
+
+This is a Wayland session: autotrack sees only some apps. For full recording, log in with the Xorg session."
+  tell info "autotrack is recording.
+
+Pause or resume: Ctrl+Alt+Shift+P
+Uninstall: autotrack uninstall (in a terminal)
+
+If you use Chrome, Edge or Brave, finish the extension steps in the browser window that opened.$note"
+elif [ "$rc" = 0 ]; then
+  tell info "Installed, but not finished.
+
+$(grep -A1 '^NOT DONE' "$log" | head -2)
+
+Log: $log"
+else
+  tell error "autotrack could not be installed.
+
+$(tail -4 "$log")
+
+Log: $log"
+fi
+exit "$rc"

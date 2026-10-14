@@ -20,8 +20,23 @@ describe("task prompt", () => {
     expect(script).toContain("$l.Text = 'What''s up?'");
   });
 
+  it("Linux: zenity, else kdialog, else none", () => {
+    const z = promptCommand("What's up?", "linux", () => true);
+    expect(z).toEqual({
+      cmd: "zenity",
+      args: ["--entry", "--title=autotrack", "--text=What's up?", "--timeout=600", "--width=380"],
+    });
+    const k = promptCommand("What's up?", "linux", (c) => c === "kdialog");
+    expect(k).toEqual({
+      cmd: "kdialog",
+      args: ["--title", "autotrack", "--inputbox", "What's up?", ""],
+    });
+    expect(promptCommand("q", "linux", () => false)).toBeNull();
+    expect(promptAnswer(0, "fixing the build\n", "linux")).toBe("fixing the build");
+  });
+
   it("no prompt elsewhere", () => {
-    expect(promptCommand("q", "linux")).toBeNull();
+    expect(promptCommand("q", "freebsd")).toBeNull();
   });
 
   it("the answer: stdout on exit 0, null otherwise; base64 UTF-8 on Windows", () => {

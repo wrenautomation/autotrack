@@ -52,7 +52,13 @@ describe("manifests", () => {
       },
       { browser: "edge", regKey: `HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\${HOST}` },
     ]);
-    expect(() => targets("linux")).toThrow(/Mac and Windows/);
+    expect(targets("linux", "/home/w").map((t) => t.dir)).toEqual([
+      "/home/w/.config/google-chrome/NativeMessagingHosts",
+      "/home/w/.config/chromium/NativeMessagingHosts",
+      "/home/w/.config/microsoft-edge/NativeMessagingHosts",
+      "/home/w/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts",
+    ]);
+    expect(() => targets("freebsd")).toThrow(/Mac, Windows and Linux/);
   });
 
   it("installs on Mac: wrapper with node, one manifest per browser", async () => {
@@ -84,6 +90,28 @@ describe("manifests", () => {
       allowed_origins: [`chrome-extension://${EXTENSION_IDS[0]}/`],
     });
     await uninstall({ platform: "darwin", env: {}, home: "/Users/w", fs });
+    expect([...fs.files.keys()]).toEqual([]);
+  });
+
+  it("installs on Linux: wrapper in the XDG data dir, one manifest per browser", async () => {
+    const fs = fakeFs();
+    const out = await install({
+      nodePath: "/home/w/.local/share/autotrack/app/node/node",
+      hostScript: "/home/w/.local/share/autotrack/app/host/autotrack-host.mjs",
+      platform: "linux",
+      env: {},
+      home: "/home/w",
+      fs,
+    });
+    const wrapper = "/home/w/.local/share/autotrack/native-host/autotrack-host.sh";
+    expect(out.wrapper).toBe(wrapper);
+    expect(fs.modes.get(wrapper)).toBe(0o755);
+    expect(out.manifests).toHaveLength(4);
+    expect(out.manifests[3]).toBe(
+      `/home/w/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts/${HOST}.json`,
+    );
+    expect(JSON.parse(fs.files.get(out.manifests[1])).path).toBe(wrapper);
+    await uninstall({ platform: "linux", env: {}, home: "/home/w", fs });
     expect([...fs.files.keys()]).toEqual([]);
   });
 

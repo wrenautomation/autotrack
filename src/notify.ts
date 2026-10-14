@@ -1,5 +1,6 @@
 /** OS notifications ("Tracking paused", "Tracking on"). Fire and forget: never blocks, never throws. */
 import { spawn } from "node:child_process";
+import { onPath } from "./linux.ts";
 
 const ps = (s: string) => s.replace(/'/g, "''");
 const as = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -9,6 +10,7 @@ export function notifyCommand(
   title: string,
   body: string,
   platform: NodeJS.Platform = process.platform,
+  has: (cmd: string) => boolean = (c) => !!onPath(c),
 ): { cmd: string; args: string[] } | null {
   if (platform === "darwin")
     return {
@@ -29,8 +31,35 @@ export function notifyCommand(
       args: ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
     };
   }
+  if (platform === "linux") {
+    // notify-send (libnotify-bin), else the same D-Bus call through gdbus (glib, on every GNOME
+    // and most others). Arguments go as argv, so nothing needs quoting.
+    if (has("notify-send")) return { cmd: "notify-send", args: ["-a", "autotrack", title, body] };
+    if (has("gdbus"))
+      return {
+        cmd: "gdbus",
+        args: [
+          "call",
+          "--session",
+          "--dest=org.freedesktop.Notifications",
+          "--object-path=/org/freedesktop/Notifications",
+          "--method=org.freedesktop.Notifications.Notify",
+          "autotrack",
+          "0",
+          "",
+          gvariantString(title),
+          gvariantString(body),
+          "[]",
+          "{}",
+          "5000",
+        ],
+      };
+  }
   return null;
 }
+
+/** A GVariant string literal for gdbus. */
+export const gvariantString = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 
 export function notify(body: string, title = "autotrack"): void {
   const c = notifyCommand(title, body);
