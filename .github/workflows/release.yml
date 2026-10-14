@@ -108,4 +108,6 @@ jobs:
           if (-not $v.StartsWith($env:GITHUB_REF_NAME.TrimStart('v') + '+')) { throw "installed $v, expected $env:GITHUB_REF_NAME" }
           & "$app\autotrack.cmd" uninstall --yes
           if ($LASTEXITCODE -ne 0) { throw "uninstall exited $LASTEXITCODE" }
+          # node.exe can't delete its own folder: a detached cmd removes it ~3 s after exit
+          for ($i = 0; $i -lt 30 -and (Test-Path $app); $i++) { Start-Sleep -Milliseconds 500 }
           if (Test-Path $app) { throw "uninstall left $app" }
