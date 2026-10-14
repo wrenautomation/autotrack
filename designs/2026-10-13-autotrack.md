@@ -556,6 +556,81 @@ Where the build is more exact than the bullets above. Field names are unchanged.
 - The Windows helpers are PowerShell 5.1 processes of about 105 MB each after startup. Every 30 s
   each one collects and trims its working set, which brings them to about 20 MB until used.
 
+## Installers (2026-10-13, William)
+
+"if it's an application maybe make a clean installer as well for windows linux and mac." Windows and
+Mac are built. Linux is a separate port (the recorder has no Linux helpers yet). It is next.
+
+Each release carries, beside the bundles and in `SHA256SUMS`:
+
+- `autotrack-setup-<version>.exe` (Windows): Inno Setup, per user, no admin prompt. The wizard
+  asks for the install code and checks it before it changes anything. Its finish page offers
+  "Start tracking now" and the browser extension steps.
+- `autotrack-<version>.dmg` (Mac, Apple silicon and Intel): holds `autotrack Installer.app` and a
+  "Read me first.txt". Opening the app asks for the code (pre-filled from the clipboard when it
+  looks like one), explains the three permissions, installs, and opens the Privacy panes.
+
+The one-liners stay. Both installers put the same files in the same places, so either path updates
+the other.
+
+One source of truth: neither installer re-implements install. The Windows setup carries the zip,
+its `SHA256SUMS`, `install.ps1` and a tiny `run.ps1`, and runs `install.ps1` in steps with
+`AUTOTRACK_STEP`: `check` (unpack, verify the checksum, decode the code, change nothing),
+`install`, `start`, `extension`. Unset runs all of them, which is the one-liner. The Mac app
+carries `install.sh` and both tarballs (`AUTOTRACK_BUNDLE` may be a folder; `uname -m` picks the
+file) and uses `AUTOTRACK_STEP=check` the same way.
+
+Decisions:
+
+- Mac is a dmg with an installer app, not a `.pkg`. A pkg's postinstall runs as root outside the
+  login session. The LaunchAgent, the Privacy panes and the dialogs all belong to the user, so a
+  pkg would have to reach back into that session for each. The app runs as the user and reuses
+  `install.sh` unchanged. Universal means both tarballs in one dmg, not a fat binary: Node and the
+  helpers are built per arch.
+- Windows is Inno Setup. It installs per user without elevation, has a scriptable code page and
+  silent switches, and is on the runners. MSIX needs a signature to install at all.
+- The setup's own folder (`%LOCALAPPDATA%\Programs\autotrack`) holds only the uninstaller. The app
+  and data stay in `%LOCALAPPDATA%\autotrack`, so `autotrack uninstall`, which deletes the app
+  folder, never deletes the program running it. Add/Remove Programs runs
+  `autotrack uninstall --yes`, then removes the uninstaller.
+- The code travels in the environment, never on a child command line.
+
+No UI, for CI:
+
+- Windows: `autotrack-setup-<version>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CODE=<code>`,
+  or the code in `AUTOTRACK`. A missing or malformed code exits Setup with code 1 and installs
+  nothing. A silent install starts tracking unless `AUTOTRACK_NO_AUTOSTART=1`, and never opens the
+  browser.
+- Mac: run `autotrack Installer.app/Contents/MacOS/autotrack-installer` with `AUTOTRACK=<code>` or
+  `AUTOTRACK_CODE_FILE=<path>` in the environment. No dialogs.
+
+Unsigned for now:
+
+- Windows: SmartScreen shows "Windows protected your PC" with publisher "Unknown publisher". Click
+  More info, then Run anyway. The one-liner never shows it. A code-signing certificate removes the
+  prompt. Signing is a later item.
+- Mac: Gatekeeper says it cannot check the app for malicious software. On macOS 14 and older,
+  right-click the app and choose Open. On macOS 15 and newer, open it once, then go to System
+  Settings > Privacy & Security and click Open Anyway. Notarizing the dmg needs the Apple
+  Developer account. Later, William's call.
+
+Tests: `ci.yml` has an `installers` job on both OSes (also from `workflow_dispatch`) that builds
+each installer from a fresh bundle and runs the smoke. `release.yml` builds them from the tagged
+bundles, attaches them, adds them to `SHA256SUMS`, and `smoke-installer` downloads each from the
+published release. The smoke refuses a missing and a malformed code, installs silently with a fake
+shape-valid code (`AUTOTRACK_NO_AUTOSTART=1`, `AUTOTRACK_NO_BROWSER=1`), runs `doctor`, checks
+`VERSION`, installs again over it, then uninstalls. On Windows it then waits for the detached
+`cmd` that deletes the app folder about 3 s later. A tag with a `-` in it (`v0.1.1-rc.1`) publishes
+as a prerelease, which `releases/latest` skips, so the one-liner smoke reads that release's own
+bundle.
+
+Known limits:
+
+- Inno's `/LOG` records the command line, so `/CODE=` lands in it. Use `AUTOTRACK` when logging.
+- `autotrack uninstall` run from the CLI leaves the Add/Remove entry behind. It is harmless; the next
+  setup replaces it.
+- Add/Remove Programs ignores a custom `AUTOTRACK_DIR` (tests only).
+
 ## Decision log
 
 - Node + `uiohook-napi` over Rust: same language and redaction rules as autobrowse, the library

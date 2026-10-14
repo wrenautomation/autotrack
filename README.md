@@ -10,6 +10,24 @@ training computer-use agents.
 You need an install code. Get one with `autobrowse autotrack enroll <device>`, which prints the
 full command for you.
 
+### Installer
+
+Get it from the [latest release](https://github.com/wrenautomation/autotrack/releases/latest).
+
+- Windows: `autotrack-setup-<version>.exe`. Double-click it, paste the code, click through.
+- Mac: `autotrack-<version>.dmg`. Open it, then open `autotrack Installer.app`. It asks for the
+  code.
+
+The installers aren't signed yet, so the first open shows a warning. On Windows, click More info,
+then Run anyway. On a Mac, right-click the app and choose Open. On macOS 15 and newer, open it
+once, then go to System Settings > Privacy & Security and click Open Anyway. The dmg has a
+"Read me first.txt" with these steps.
+
+For scripts, `autotrack-setup-<version>.exe /VERYSILENT /CODE=<code>` installs with no window. On
+a Mac, run the app's `Contents/MacOS/autotrack-installer` with `AUTOTRACK=<code>` set.
+
+### One line
+
 Mac (Terminal):
 
 ```sh
@@ -22,10 +40,10 @@ Windows (PowerShell):
 $env:AUTOTRACK='<code>'; irm https://raw.githubusercontent.com/wrenautomation/autotrack/main/install/install.ps1 | iex
 ```
 
-You don't need admin rights or Node. The installer downloads the latest release, verifies its
-SHA-256, and sets autotrack to start at login. On a Mac it then opens System Settings so you can
-allow Accessibility, Input Monitoring and Screen Recording for `node`, and it waits until you
-have. To update, run the same command again.
+You don't need admin rights or Node either way. The one-liner downloads the latest release and the
+installers carry it. Both verify its SHA-256 and set autotrack to start at login. On a Mac they
+then open System Settings so you can allow Accessibility, Input Monitoring and Screen Recording
+for `node`, and wait until you have. To update, run the same command or installer again.
 
 For page detail in Chrome or Edge, load the autotrack extension. The installer unpacks it to
 `extension/` in the data folder (see "Where the data goes"), copies that path to your clipboard,
