@@ -1,0 +1,96 @@
+#!/bin/sh
+# autotrack Installer.app: the double-click installer. Asks for the install code, then runs the
+# bundled install.sh (the same file as the one-line install) against the bundled tarballs, as you,
+# in your session: LaunchAgent, Privacy panes and dialogs all need that, which is why this is an
+# app on a disk image and not a root .pkg.
+#
+# No UI: with the code in AUTOTRACK, or in the file AUTOTRACK_CODE_FILE names, nothing is asked and
+# the output goes to stdout. The exit code is install.sh's. For CI:
+#   AUTOTRACK=<code> AUTOTRACK_NO_AUTOSTART=1 AUTOTRACK_NO_BROWSER=1 "autotrack Installer.app/Contents/MacOS/autotrack-installer"
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+here=$(cd "$(dirname "$0")" && pwd)
+res="$here/../Resources"
+log="$HOME/Library/Logs/autotrack-installer.log"
+mkdir -p "$HOME/Library/Logs"
+
+code=${AUTOTRACK:-}
+if [ -z "$code" ] && [ -n "${AUTOTRACK_CODE_FILE:-}" ]; then
+  code=$(tr -d ' \t\r\n' <"$AUTOTRACK_CODE_FILE") || code=""
+fi
+
+if [ -n "$code" ]; then
+  AUTOTRACK="$code" AUTOTRACK_BUNDLE="$res/bundles" exec sh "$res/install.sh"
+fi
+
+# Dialogs. The text goes in as arguments, so nothing needs escaping.
+ask() { # <default answer> <message>: prints the answer; non-zero on Cancel
+  osascript - "$1" "$2" <<'AS' 2>/dev/null
+on run argv
+  set r to display dialog (item 2 of argv) with title "autotrack" default answer (item 1 of argv) buttons {"Cancel", "Install"} default button "Install" with icon note
+  return text returned of r
+end run
+AS
+}
+tell() { # <message> [button]: prints the button pressed
+  osascript - "$1" "${2:-OK}" <<'AS' 2>/dev/null
+on run argv
+  set r to display dialog (item 1 of argv) with title "autotrack" buttons {"Close", (item 2 of argv)} default button (item 2 of argv)
+  return button returned of r
+end run
+AS
+}
+
+# A code is long base64url text; if one is on the clipboard, offer it.
+default=$(pbpaste 2>/dev/null | tr -d ' \t\r\n' | cut -c1-4000)
+case $default in *[!A-Za-z0-9_-]*) default="" ;; esac
+[ "${#default}" -ge 40 ] || default=""
+
+msg="Paste the install code for this Mac.
+
+You get it from: autobrowse autotrack enroll <device>
+
+autotrack installs for you only. No administrator password."
+while :; do
+  answer=$(ask "$default" "$msg") || exit 0
+  code=$(printf '%s' "$answer" | tr -d ' \t\r\n')
+  [ -n "$code" ] || { msg="Paste the install code."; continue; }
+  if out=$(AUTOTRACK="$code" AUTOTRACK_STEP=check AUTOTRACK_BUNDLE="$res/bundles" sh "$res/install.sh" 2>&1); then
+    break
+  fi
+  default=$code
+  msg="That install code did not work.
+
+$(printf '%s\n' "$out" | tail -3)
+
+Paste it again."
+done
+
+btn=$(tell "Next, System Settings opens three Privacy panes: Accessibility, Input Monitoring and Screen Recording. In each, turn on \"node\". This can take a few minutes." "Start") || exit 0
+[ "$btn" = Start ] || exit 0
+
+AUTOTRACK="$code" AUTOTRACK_BUNDLE="$res/bundles" sh "$res/install.sh" >"$log" 2>&1
+rc=$?
+if [ $rc -eq 0 ] && grep -q '^autotrack is recording\.' "$log"; then
+  tell "autotrack is recording.
+
+Pause or resume: Ctrl+Alt+Shift+P
+Uninstall: open Terminal and run: autotrack uninstall
+
+If you use Chrome or Edge, finish the extension steps in the browser window that opened." "Done" >/dev/null
+elif [ $rc -eq 0 ]; then
+  tell "Installed, but not finished.
+
+$(grep -A1 '^NOT DONE' "$log" | head -2)
+
+Turn \"node\" on in System Settings > Privacy & Security, then run in Terminal:
+launchctl kickstart -k gui/$(id -u)/com.wrenautomation.autotrack" "Done" >/dev/null
+else
+  btn=$(tell "autotrack could not be installed.
+
+$(tail -4 "$log")" "Show log")
+  [ "$btn" = "Show log" ] && open -a Console "$log"
+fi
+exit $rc
