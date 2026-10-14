@@ -90,3 +90,66 @@ jobs:
           path: ${{ runner.temp }}/autotrack-e2e
           if-no-files-found: ignore
           retention-days: 7
+
+  # The double-click installers, built from the just-built bundle and run silently on each OS:
+  # install, doctor, upgrade over it, uninstall. Also parse-checks the PowerShell scripts.
+  installers:
+    name: installer ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: version
+        id: v
+        shell: bash
+        run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+      - name: PowerShell parses (windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $bad = 0
+          foreach ($f in 'install\install.ps1', 'installer\windows\run.ps1', 'installer\windows\build.ps1', 'installer\windows\smoke.ps1') {
+            $tokens = $null; $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f).Path, [ref]$tokens, [ref]$errs)
+            foreach ($e in $errs) { Write-Host "::error file=$f,line=$($e.Extent.StartLineNumber)::$($e.Message)"; $bad++ }
+          }
+          if ($bad) { exit 1 }
+      - name: shell scripts parse (mac)
+        if: runner.os == 'macOS'
+        run: for f in install/install.sh installer/mac/build.sh installer/mac/smoke.sh installer/mac/autotrack-installer; do sh -n "$f"; done
+      - run: node scripts/bundle.mjs
+      - name: build the installer (windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File installer\windows\build.ps1
+      - name: install, doctor, upgrade, uninstall (windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File installer\windows\smoke.ps1 -Installer installer\windows\out\autotrack-setup-${{ steps.v.outputs.version }}.exe -Version ${{ steps.v.outputs.version }}
+      - name: build the installer (mac)
+        if: runner.os == 'macOS'
+        run: sh installer/mac/build.sh
+      - name: install, doctor, upgrade, uninstall (mac)
+        if: runner.os == 'macOS'
+        run: sh installer/mac/smoke.sh "installer/mac/out/autotrack-${{ steps.v.outputs.version }}.dmg" "${{ steps.v.outputs.version }}"
+      - name: logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/autotrack-installer-smoke
+            installer/windows/out/*.exe
+            installer/mac/out/*.dmg
+          if-no-files-found: ignore
+          retention-days: 3

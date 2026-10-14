@@ -1,7 +1,9 @@
 name: release
 
-# Push a tag like v0.1.0 (matching package.json) to build the three bundles on their own runners and
-# publish them with SHA256SUMS as a GitHub Release. The installers fetch releases/latest.
+# Push a tag like v0.1.0 (matching package.json) to build the three bundles and the two installers
+# (Windows setup .exe, Mac disk image) on their own runners and publish them with SHA256SUMS as a
+# GitHub Release. The one-line installers fetch releases/latest. A tag with a dash (v0.1.1-rc.1) is
+# published as a prerelease: GitHub never makes it "latest", so the one-line installs ignore it.
 on:
   push:
     tags: ["v*"]
@@ -43,8 +45,53 @@ jobs:
             bundles/autotrack-extension.zip
           if-no-files-found: error
 
-  publish:
+  # The Windows setup program (Inno Setup): carries the win32 bundle, runs install.ps1 against it.
+  installer-windows:
     needs: bundle
+    name: installer windows
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle-win32-x64
+          path: bundles
+      - name: build
+        shell: cmd
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File installer\windows\build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows
+          path: installer/windows/out/autotrack-setup-*.exe
+          if-no-files-found: error
+
+  # The Mac disk image: "autotrack Installer.app" carrying both Mac bundles and install.sh.
+  installer-mac:
+    needs: bundle
+    name: installer mac
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-darwin-*
+          path: bundles
+          merge-multiple: true
+      - name: build
+        run: sh installer/mac/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-mac
+          path: installer/mac/out/autotrack-*.dmg
+          if-no-files-found: error
+
+  publish:
+    needs: [bundle, installer-windows, installer-mac]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -52,6 +99,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: bundle-*
+          path: out
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
           path: out
           merge-multiple: true
       - name: SHA256SUMS
@@ -63,9 +115,11 @@ jobs:
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "$GITHUB_REF_NAME" out/*
-          --repo "$GITHUB_REPOSITORY" --title "autotrack $GITHUB_REF_NAME" --generate-notes
+        run: |
+          flags=""
+          case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" out/* $flags \
+            --repo "$GITHUB_REPOSITORY" --title "autotrack $GITHUB_REF_NAME" --generate-notes
 
   # What a person runs, against the release just published: the one-line install from main, then
   # doctor and uninstall. A shape-valid code with a fake key; nothing ships, nothing starts at login.
@@ -82,6 +136,17 @@ jobs:
       AUTOTRACK_NO_AUTOSTART: "1"
       AUTOTRACK_NO_BROWSER: "1"
     steps:
+      # releases/latest skips prereleases: point the one-line install at this release's own bundle.
+      - name: prerelease bundle
+        if: contains(github.ref_name, '-')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$RUNNER_OS" in macOS) asset=autotrack-darwin-arm64.tar.gz ;; *) asset=autotrack-win32-x64.zip ;; esac
+          mkdir -p "$RUNNER_TEMP/rel"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --pattern SHA256SUMS --dir "$RUNNER_TEMP/rel"
+          echo "AUTOTRACK_BUNDLE=$RUNNER_TEMP/rel/$asset" >> "$GITHUB_ENV"
       - name: install code
         shell: bash
         run: |
@@ -111,3 +176,51 @@ jobs:
           # node.exe can't delete its own folder: a detached cmd removes it ~3 s after exit
           for ($i = 0; $i -lt 30 -and (Test-Path $app); $i++) { Start-Sleep -Milliseconds 500 }
           if (Test-Path $app) { throw "uninstall left $app" }
+
+  # The installers, as downloaded from the release just published: the Mac disk image is mounted and
+  # run with no UI; the Windows setup program runs silently, then Add/Remove Programs uninstalls it.
+  smoke-installer:
+    needs: publish
+    name: installer from the release, ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: download, verify, install, doctor, uninstall (mac)
+        if: runner.os == 'macOS'
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          mkdir dl
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "autotrack-$v.dmg" --pattern SHA256SUMS --dir dl
+          (cd dl && grep " autotrack-$v.dmg\$" SHA256SUMS | shasum -a 256 -c -)
+          sh installer/mac/smoke.sh "dl/autotrack-$v.dmg" "$v"
+      - name: download, verify, install, doctor, uninstall (windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          New-Item -ItemType Directory dl | Out-Null
+          gh release download $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --pattern "autotrack-setup-$v.exe" --pattern SHA256SUMS --dir dl
+          if ($LASTEXITCODE -ne 0) { throw "gh release download exited $LASTEXITCODE" }
+          $exe = "dl\autotrack-setup-$v.exe"
+          $line = Get-Content dl\SHA256SUMS | Where-Object { $_ -match ("  autotrack-setup-" + [regex]::Escape($v) + "\.exe$") }
+          if (-not $line) { throw 'SHA256SUMS has no line for the installer' }
+          $want = ($line -split '\s+')[0]
+          $got = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
+          if ($got -ne $want) { throw "checksum mismatch: got $got, want $want" }
+          powershell -NoProfile -ExecutionPolicy Bypass -File installer\windows\smoke.ps1 -Installer $exe -Version $v
+          if ($LASTEXITCODE -ne 0) { throw "installer smoke exited $LASTEXITCODE" }
+      - name: logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-installer-${{ matrix.os }}
+          path: ${{ runner.temp }}/autotrack-installer-smoke
+          if-no-files-found: ignore
+          retention-days: 7
