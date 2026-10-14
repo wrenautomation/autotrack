@@ -1,7 +1,10 @@
 import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { clipboardOf, Probe, type ProbeChild, TREE_NODES } from "./probe.ts";
+import { clipboardOf, helperCommand, Probe, type ProbeChild, TREE_NODES } from "./probe.ts";
 
 /** A fake helper: records requests; the test answers when and how it likes. */
 class FakeChild extends EventEmitter implements ProbeChild {
@@ -177,5 +180,27 @@ describe("probe client", () => {
     expect(probe.available).toBe(false);
     expect(await probe.at(1, 1)).toBeNull();
     expect(await probe.perm()).toBeNull();
+  });
+});
+
+describe("helperCommand", () => {
+  it("Windows: the compiled exe, its mode named; Mac: the probe, probe mode by default", () => {
+    const root = mkdtempSync(join(tmpdir(), "autotrack-helper-"));
+    try {
+      expect(helperCommand("win32", root)).toBeNull();
+      mkdirSync(join(root, "helpers", "win"), { recursive: true });
+      mkdirSync(join(root, "helpers", "mac"), { recursive: true });
+      const exe = join(root, "helpers", "win", "autotrack-helper.exe");
+      writeFileSync(exe, "");
+      writeFileSync(join(root, "helpers", "mac", "probe"), "");
+      expect(helperCommand("win32", root)).toEqual({ cmd: exe, args: ["--probe"], path: exe });
+      expect(helperCommand("win32", root, "shots")?.args).toEqual(["--shots"]);
+      expect(helperCommand("win32", root, "ocr")?.args).toEqual(["--ocr"]);
+      expect(helperCommand("darwin", root)?.args).toEqual([]);
+      expect(helperCommand("darwin", root, "shots")?.args).toEqual(["--shots"]);
+      expect(helperCommand("linux", root)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

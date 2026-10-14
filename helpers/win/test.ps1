@@ -1,8 +1,9 @@
-# Windows probe test: starts probe.ps1, opens its own text box window (test-form.ps1), checks perm,
-# front, focused, at on the text box, bad input, `at` latency over 50 requests, the form's tree, a
-# message box as front.dialog, pushed clipboard events, usage and power. Then starts `probe.ps1 --shots`
-# and checks displays, grab, save (JPEG, at most 1920 px), crop (native pixels), usage, the ring and
-# timing; then `probe.ps1 --ocr` on test/fixtures/ocr-text.jpg (known text). Exits 1 and prints every failure.
+# Windows helper test: builds autotrack-helper.exe (build.ps1), starts it with --probe, opens its own
+# text box window (test-form.ps1), checks perm, front, focused, at on the text box, bad input, `at`
+# latency over 50 requests, the form's tree, a message box as front.dialog, pushed clipboard events,
+# usage, power and idle RSS. Then `--shots`: displays, grab, save (JPEG, at most 1920 px), crop
+# (native pixels), usage, the ring, timing and RSS; then `--ocr` on test/fixtures/ocr-text.jpg
+# (known text). Exits 1 and prints every failure.
 # Run: powershell -NoProfile -ExecutionPolicy Bypass -File test.ps1   (Windows PowerShell 5.1)
 $ErrorActionPreference = 'Stop'
 $failures = New-Object System.Collections.ArrayList
@@ -27,10 +28,13 @@ public static class TestNative {
 Add-Type -AssemblyName WindowsBase, UIAutomationClient, UIAutomationTypes, System.Windows.Forms
 $UIA = [System.Windows.Automation.AutomationElement]
 
-$probe = Join-Path $PSScriptRoot 'probe.ps1'
+& (Join-Path $PSScriptRoot 'build.ps1')
+$helper = Join-Path $PSScriptRoot 'autotrack-helper.exe'
+# Idle RSS per helper: reported, and over this it fails (Windows active use is 200 MB in all).
+$rssMaxMb = 30
 $psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = 'powershell.exe'
-$psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$probe`""
+$psi.FileName = $helper
+$psi.Arguments = '--probe'
 $psi.UseShellExecute = $false
 $psi.RedirectStandardInput = $true
 $psi.RedirectStandardOutput = $true
@@ -90,7 +94,7 @@ function Find-TestForm {
 
 try {
     # perm
-    $perm = Ask @{ op = 'perm' } 60000    # first answer waits for the helper's compile and UIA load
+    $perm = Ask @{ op = 'perm' } 30000    # the first answer waits for the runtime and UIA load
     Check ($perm.accessibility -eq $true -and $perm.screen -eq $true -and $perm.input -eq $true) 'perm is not all true'
 
     # bad input must not kill the helper
@@ -254,6 +258,10 @@ try {
 
     $u = Ask @{ op = 'usage' }
     Check ($u.cpuMs -gt 0 -and $u.rssMb -gt 0) "probe usage: $($u | ConvertTo-Json -Compress)"
+    Start-Sleep -Milliseconds 6500   # the helper trims its working set after 5 s without requests
+    $ui = Ask @{ op = 'usage' }
+    Write-Host "probe RSS $($u.rssMb) MB after the checks, $($ui.rssMb) MB idle (target $rssMaxMb), $($ui.cpuMs) ms CPU"
+    Check ($ui.rssMb -le $rssMaxMb) "probe idle RSS $($ui.rssMb) MB is over $rssMaxMb MB"
     $pw = Ask @{ op = 'power' }
     Write-Host ('power: ' + ($pw | ConvertTo-Json -Compress))
     Check ($null -ne $pw.PSObject.Properties['ac'] -and $null -ne $pw.PSObject.Properties['battery']) 'power answers ac and battery'
@@ -270,13 +278,13 @@ finally {
     if ($testForm -and -not $testForm.HasExited) { Stop-Process -Id $testForm.Id -Force -ErrorAction SilentlyContinue }
 }
 
-# ---- shots mode: displays, grab, save, ring, bad input (`probe.ps1 --shots`) ----
+# ---- shots mode: displays, grab, save, ring, bad input (`--shots`) ----
 $sp = $null
 try {
     Add-Type -AssemblyName System.Drawing
     $psi2 = New-Object System.Diagnostics.ProcessStartInfo
-    $psi2.FileName = 'powershell.exe'
-    $psi2.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$probe`" --shots"
+    $psi2.FileName = $helper
+    $psi2.Arguments = '--shots'
     $psi2.UseShellExecute = $false
     $psi2.RedirectStandardInput = $true
     $psi2.RedirectStandardOutput = $true
@@ -305,7 +313,7 @@ try {
         finally { $img.Dispose() }
     }
 
-    $disp = Ask-Shots @{ op = 'displays' } 60000   # the first answer waits for the C# compile
+    $disp = Ask-Shots @{ op = 'displays' } 30000   # the first answer waits for the runtime
     $list = @($disp.displays)
     Check ($list.Count -ge 1) 'displays: none'
     foreach ($d in $list) {
@@ -368,8 +376,6 @@ try {
     $cbad = Ask-Shots @{ op = 'crop'; display = '999999'; x = 0; y = 0; w = 10; h = 10; path = $cropOut }
     Check ($cbad.ok -eq $false -and $cbad.error -is [string]) 'crop of an unknown display must fail cleanly'
     Remove-Item $cropOut -Force -ErrorAction SilentlyContinue
-    $su = Ask-Shots @{ op = 'usage' }
-    Check ($su.cpuMs -gt 0 -and $su.rssMb -gt 0) "shots usage: $($su | ConvertTo-Json -Compress)"
 
     # timing
     $gm = New-Object System.Collections.ArrayList
@@ -386,6 +392,15 @@ try {
     Write-Host ('grab ms: p50 {0:N1}  p95 {1:N1}   save ms: p50 {2:N1}  p95 {3:N1}' -f $gs[9], $gs[18], $ss[9], $ss[18])
     Check ($gs[18] -lt 2000) 'grab p95 is over the 2 s sanity bound'
     Remove-Item $out, $low -Force -ErrorAction SilentlyContinue
+
+    # RSS: the ring holds 4 frames of w x h x 4 bytes once grabbed; idle is that plus the runtime.
+    $su = Ask-Shots @{ op = 'usage' }
+    Check ($su.cpuMs -gt 0 -and $su.rssMb -gt 0) "shots usage: $($su | ConvertTo-Json -Compress)"
+    $ringMb = [math]::Round(4 * $g.w * $g.h * 4 / 1MB)
+    Start-Sleep -Milliseconds 6500
+    $si = Ask-Shots @{ op = 'usage' }
+    Write-Host "shots RSS $($su.rssMb) MB after the checks, $($si.rssMb) MB idle (target $rssMaxMb + the $ringMb MB ring), $($si.cpuMs) ms CPU"
+    Check ($si.rssMb -le $rssMaxMb + $ringMb) "shots idle RSS $($si.rssMb) MB is over $rssMaxMb MB + the $ringMb MB ring"
 }
 catch { Fail $_.Exception.Message }
 finally {
@@ -396,11 +411,11 @@ finally {
     }
 }
 
-# ---- ocr mode: known text from the fixture (`probe.ps1 --ocr`) ----
+# ---- ocr mode: known text from the fixture (`--ocr`) ----
 function Start-Ocr {
     $psi3 = New-Object System.Diagnostics.ProcessStartInfo
-    $psi3.FileName = 'powershell.exe'
-    $psi3.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$probe`" --ocr"
+    $psi3.FileName = $helper
+    $psi3.Arguments = '--ocr'
     $psi3.UseShellExecute = $false
     $psi3.RedirectStandardInput = $true
     $psi3.RedirectStandardOutput = $true
@@ -443,7 +458,10 @@ try {
     Check ($missing.error -is [string]) 'ocr of a missing image must answer an error'
     $ou = Ask-Ocr $op @{ op = 'usage' }
     Check ($ou.cpuMs -gt 0 -and $ou.rssMb -gt 0) "ocr usage: $($ou | ConvertTo-Json -Compress)"
-    Write-Host "ocr helper RSS $($ou.rssMb) MB"
+    Start-Sleep -Milliseconds 6500
+    $oi = Ask-Ocr $op @{ op = 'usage' }
+    # OCR runs only while the person is idle and is killed at the first input: not in the active budget.
+    Write-Host "ocr RSS $($ou.rssMb) MB after a read, $($oi.rssMb) MB idle (reported only)"
 }
 catch { Fail $_.Exception.Message }
 finally {

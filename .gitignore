@@ -1,5 +1,6 @@
-# Built by helpers/mac/build.sh
+# Built by helpers/mac/build.sh and helpers/win/build.ps1
 helpers/mac/probe
+helpers/win/autotrack-helper.exe
 node_modules/
 dist/
 *.log

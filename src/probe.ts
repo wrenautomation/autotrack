@@ -1,5 +1,5 @@
 /**
- * Client for the probe helper (helpers/mac/probe, helpers/win/probe.ps1): what app and window is
+ * Client for the probe helper (helpers/mac/probe, helpers/win/autotrack-helper.exe): what app and window is
  * in front (and whether it is a dialog), what element is at a point or has focus, which
  * permissions are granted. Each answer has 50 ms; a miss is `null`. `tree` walks the front
  * window on the helper's own worker and has seconds. Clipboard changes come unasked once watched.

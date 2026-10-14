@@ -1,7 +1,8 @@
 /**
- * The real screen, through the native helper's `--shots` mode (helpers/mac/probe, helpers/win/probe.ps1):
- * it grabs a display into a ring of the last few grabs in its own memory, answers a slot and a
- * hash, and writes the JPEG when asked. Node keeps slot numbers and hashes, never pixels.
+ * The real screen, through the native helper's `--shots` mode (helpers/mac/probe,
+ * helpers/win/autotrack-helper.exe): it grabs a display into a ring of the last few grabs in its
+ * own memory, answers a slot and a hash, and writes the JPEG when asked. Node keeps slot numbers
+ * and hashes, never pixels.
  *
  * It is a second process next to the probe, so a capture never delays a probe answer. A missing or
  * failing helper means no frames; the recorder carries on without them.
@@ -113,7 +114,7 @@ export class ShotsCapturer implements Capturer {
 
   /**
    * Re-read the display list; keeps the old one when the helper doesn't answer. The first call
-   * after start can be slow (PowerShell compiles its code before it reads a request).
+   * after start can be slow (the helper loads its runtime before it reads a request).
    */
   async refresh(timeoutMs?: number): Promise<boolean> {
     const a = await this.shots.displays(timeoutMs);

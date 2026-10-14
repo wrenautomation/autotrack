@@ -2,7 +2,7 @@
 /**
  * Builds the release bundle for one platform: `bundles/autotrack-<platform>-<arch>.{zip|tar.gz}`,
  * plus its line in `bundles/SHA256SUMS`. Run it on that platform (CI does, one runner each), so
- * the production node_modules carry that platform's prebuilds and the Mac probe gets compiled.
+ * the production node_modules carry that platform's prebuilds and the helper gets compiled.
  *
  *   node scripts/bundle.mjs [--arch x64|arm64] [--out bundles] [--skip-build]
  *
@@ -12,7 +12,8 @@
  *   node/node[.exe]          official Node, pinned below, SHA-256 checked twice
  *   dist/                    tsc output, tests left out
  *   node_modules/            production deps, hoisted (no symlinks), this platform only
- *   helpers/mac/probe        universal binary (Mac) | helpers/win/*.ps1 (Windows)
+ *   helpers/mac/probe        universal binary (Mac) | helpers/win/autotrack-helper.exe (Windows,
+ *                            C# for .NET Framework 4.8, built by helpers/win/build.ps1)
  *   host/*.mjs               native messaging host for the browser extension
  *   install/setup.mjs        config.json + browser host, run by install.sh / install.ps1
  *   install/perm.mjs         Mac: asks the probe which permissions node holds
@@ -235,11 +236,17 @@ async function main() {
       chmodSync(join(stage, "bin", "autotrack"), 0o755);
       cpSync(join(ROOT, "install", "perm.mjs"), join(stage, "install", "perm.mjs"));
     } else {
+      const exe = join(ROOT, "helpers", "win", "autotrack-helper.exe");
+      run("powershell.exe", [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        join(ROOT, "helpers", "win", "build.ps1"),
+      ]);
+      if (!existsSync(exe)) throw new Error("helpers/win/autotrack-helper.exe not built");
       mkdirSync(join(stage, "helpers", "win"), { recursive: true });
-      for (const f of readdirSync(join(ROOT, "helpers", "win")).filter(
-        (f) => f.endsWith(".ps1") && !/^test/.test(f),
-      ))
-        cpSync(join(ROOT, "helpers", "win", f), join(stage, "helpers", "win", f));
+      cpSync(exe, join(stage, "helpers", "win", "autotrack-helper.exe"));
       writeFileSync(
         join(stage, "autotrack.cmd"),
         '@"%~dp0node\\node.exe" "%~dp0dist\\cli.js" %*\r\n',
