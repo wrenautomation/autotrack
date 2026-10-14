@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Threading;
 using Windows.Foundation;
 using Windows.Graphics.Imaging;
 using Windows.Media.Ocr;
@@ -38,10 +39,17 @@ static class Ocr {
         }
     }
 
-    // WinRT async to a result on this thread; the real error, not AggregateException's.
+    // WinRT async to a result on this thread. `Completed` fires at once when the operation is
+    // already done, so there is no race. Not AsTask: its types need the union Windows.winmd of an
+    // SDK, which a bare Windows does not have.
     static T Wait<T>(IAsyncOperation<T> op) {
-        try { return op.AsTask().Result; }
-        catch (AggregateException e) { throw e.InnerException ?? e; }
+        using (ManualResetEvent done = new ManualResetEvent(false)) {
+            op.Completed = delegate { done.Set(); };
+            done.WaitOne();
+        }
+        if (op.Status == AsyncStatus.Error) throw op.ErrorCode;
+        if (op.Status != AsyncStatus.Completed) throw new OperationCanceledException();
+        return op.GetResults();
     }
 
     static string Read(string path) {
