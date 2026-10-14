@@ -410,6 +410,92 @@ Where the build is more exact than the bullets above:
 - The control socket takes lines up to 256 KB (was 64 KB) so a 30k-character snapshot, escaped,
   fits.
 
+## Quality: dynamic capture, deferred enrichment (2026-10-13, William)
+
+"Make sure data quality is as high and enriched as possible without huge performance and memory
+bottlenecks (background efficient tasks vs upfront calculations, dynamic usage based on computer
+activity), to maximize chances RL goes well."
+
+Rule: the machine captures only what dies with the moment (pixels at native resolution, the live
+tree, the cursor path, timing). Anything derivable from shipped data is computed offline in
+autobrowse, where reruns are free. Extra work on the machine runs when the person is idle, under a
+budget, and stops at the first input.
+
+### Level governor (recorder)
+
+Every 10 s the recorder picks a level and writes `{kind:"level", level, why}` when it changes, so
+every act says what quality it was captured at.
+
+| | `full` | `normal` | `lean` |
+|---|---|---|---|
+| When | on AC, system calm | default; battery ≥ 20% | battery < 20%, system busy, or own CPU over budget for 60 s |
+| Ring (before frame) | 250 ms | 500 ms | 1 s |
+| After frame | settle, 100 ms ticks | settle, 150 ms ticks | fixed 300 ms |
+| Crops | yes | yes | no |
+| Idle frames | 1 s | 2 s | 5 s |
+| Trees | focus + screen change | focus + screen change | focus only |
+
+- Inputs: own CPU (recorder + helpers, 60 s window), power (Mac `pmset -g batt`, Windows
+  `GetSystemPowerStatus`, polled every 60 s), system busy (Mac load average / cores > 0.85,
+  Windows `GetSystemTimes` idle < 15%, over 60 s). `why` names the input that decided it.
+- Video guard: when the idle hash changes on over 80% of idle ticks for 30 s with no input
+  (a video, a game), idle frames drop to one per 10 s until input or a still screen.
+- The 3% CPU and 200 MB RSS budget holds at every level; `doctor` prints the level and its
+  measured cost.
+
+### Captured at the moment
+
+- **Click before frame, fresh.** A click or drag grabs at button-down (SCK ~3 ms CPU) instead of
+  taking the ring's latest, so `before` is the screen the person clicked on. Keys and text keep the
+  ring (a key's effect starts at key-down).
+- **After frame on settle.** After an act, grab every tick until two grabs in a row hash the same,
+  up to 3 s. `after` is that settled frame. The act gains `settle: ms` (act end to stable) and
+  `settled: false` when 3 s ran out (a spinner, a video). `out.screen` compares before and settled.
+- **Cursor approach.** The recorder keeps every raw move (60–120 Hz) in a 1.5 s memory ring. A
+  click, drag or scroll gains `path: [[dt, x, y], …]`, the last 1 s before button-down, at most
+  60 points (dt in ms, negative, before the act). A drag's own path is kept the same way, at most
+  120 points. `move` events stay 20 Hz.
+- **Native crop.** At a click, a drag's start and a scroll, a 256×256-point crop around the
+  pointer at the display's native pixels (512×512 on a 2× display), JPEG q85, stored as
+  `crops/<n>.jpg` (n counts over the session); the act gains `crop: n`. Frames are capped at 1920 px,
+  so on a Retina or 4K screen small text is only readable here. Shots op
+  `{"op":"crop","display":"1","x":…,"y":…,"w":256,"h":256,"path":…,"quality":85}` grabs only that
+  rect (SCK `sourceRect`, `BitBlt` of the rect). Never on a secure element or in an excluded app.
+- **Shot timing.** A `{kind:"shot", frame, at, x, y, display}` event per written frame: `at` is
+  the grab's `t` (a ring frame can be older than the act), `x, y` the cursor then (screenshots carry
+  no cursor).
+- **Integrity stats.** Each closed segment writes `stats.json`: events by kind, moves dropped,
+  probe answers and timeouts, acts with a null element, frames saved / failed / slot reused, trees,
+  crops, ocr done, seconds per level, helper restarts. `session.json` gains the running totals. A
+  trainer filters on these.
+
+### Enriched in idle time (on the machine)
+
+- **OCR.** The OS's own engine (Mac Vision `VNRecognizeTextRequest`, accurate; Windows
+  `Windows.Media.Ocr`) reads each written frame and crop: `ocr/<n>.json` (frames) and
+  `ocr/c<n>.json` (crops), `{lines: [{text, x, y, w, h, conf}]}` in that image's pixels, text through
+  the same secret redaction. A frame whose hash equals one already read writes `{same: m}`.
+- **When.** Only while the person has been idle ≥ 20 s, on AC or battery ≥ 50%, and the level is
+  not `lean`. One image at a time; the first input stops it within 100 ms and it resumes at the next
+  idle. It runs in a third helper (`--ocr`) started on demand at background priority (Mac QoS
+  background, Windows BelowNormal) and quit when its queue is empty, so it holds no memory between
+  runs.
+- **Ship.** A closed segment gets `.done` when its OCR is finished or 2 h after closing, whichever
+  comes first; OCR not done by then is skipped and counted in `stats.json`. Ship is unchanged.
+
+### Derived offline (autobrowse)
+
+- `autobrowse autotrack steps <device> <session>` writes the RL view: one line per act,
+  `{episode, goal, step, t, obs: {frame, crop, tree, ocr}, action: {type, x, y, nx, ny, button,
+  count, text, key, mods, path}, element, next: {frame, tree}, settle, settled, out, treeDiff, signals,
+  intent, level}` where `x, y` are frame pixels and `nx, ny` are 0–1. `treeDiff`: nodes added,
+  removed and renamed (role + name) between the last tree before the act and the first after it.
+  Stored as `steps/<device>/<session>.jsonl.gz` in the bucket and next to the import.
+- Quality per episode and session: share of acts with a before and settled after, an element, a
+  tree, a crop; time at each level; gaps (pauses, helper restarts). `autotrack list` shows it;
+  `steps --min-quality` filters.
+- Import and label read `crops/`, `ocr/` and `stats.json` keys.
+
 ## Decision log
 
 - Node + `uiohook-napi` over Rust: same language and redaction rules as autobrowse, the library
@@ -436,3 +522,9 @@ Where the build is more exact than the bullets above:
 - Mac captures with ScreenCaptureKit first, not `CGDisplayCreateImage` (measured 2026-10-13): CG
   cost ~40 ms CPU and left the helper at 210-350 MB RSS; SCK scales on the GPU and costs ~2.5 ms CPU
   and ~55 MB. CG stays as the fallback (macOS 12 and 13, or SCK failing).
+- Capture what dies with the moment, derive the rest offline (2026-10-13, quality): a tree diff, a
+  quality score or a normalized action can be rerun over old data; a native crop or a cursor path
+  cannot. OCR is the exception that runs on the machine: the OS engines are free, accurate, and need
+  no upload of full-resolution pixels, so it runs in idle time instead.
+- Levels over fixed rates: a laptop on battery or a busy machine keeps recording at lower quality
+  rather than slowing the person down, and every act records the level it got.
