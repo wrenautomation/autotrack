@@ -587,8 +587,8 @@ The first Windows e2e ran 8.9% CPU and 270 MB with input. The fixes:
 
 ## Installers (2026-10-13, William)
 
-"if it's an application maybe make a clean installer as well for windows linux and mac." Windows and
-Mac are built. Linux is a separate port (the recorder has no Linux helpers yet). It is next.
+"if it's an application maybe make a clean installer as well for windows linux and mac." All three
+are built. Linux is its own port; its installer is in "Linux" below.
 
 Each release carries, beside the bundles and in `SHA256SUMS`:
 
@@ -660,6 +660,124 @@ Known limits:
   setup replaces it.
 - Add/Remove Programs ignores a custom `AUTOTRACK_DIR` (tests only).
 
+## Linux (2026-10-13, William)
+
+"make a clean installer as well for windows linux and mac." Linux is a port: the same recorder, a
+new helper, an installer.
+
+Target: x64 desktops on Ubuntu 22.04+, Debian 12+ and Fedora 39+. An X11 session is first-class.
+
+Decisions:
+
+- **Wayland runs degraded, and `doctor` says so.** Wayland has no passive global input by design.
+  uiohook's XRecord sees only XWayland apps. X11 screen capture under XWayland shows only X windows,
+  and AT-SPI screen coordinates are not real there, so `at` misses. The portal route (ScreenCast
+  over PipeWire) would bring frames back. It needs libpipewire and a consent prompt each session,
+  and it still gives no input, so it is not built. On Wayland autotrack still runs and records what
+  XWayland apps do. Nothing leaks: native Wayland apps' keys never reach it. `doctor` WARNs on
+  `XDG_SESSION_TYPE=wayland` or `WAYLAND_DISPLAY`. The fix is to log out, pick the X11 session on
+  the login screen (gear icon: "Ubuntu on Xorg", "GNOME on Xorg", "Plasma (X11)") and log back in.
+  Fedora 41 and later ship GNOME without an Xorg session; use a desktop that still has one (KDE
+  with its X11 session package, Xfce, Cinnamon, MATE) or accept degraded.
+- **Input** is the uiohook-napi linux-x64 prebuild: XRecord on its own thread. It links libX11,
+  libXtst, libXrandr and libXt, which every X11 desktop has. Key text comes from keycodes on a US
+  layout, as on Mac and Windows. `xdotool` (XTest) input is seen like a person's, which the e2e
+  uses.
+- **The helper is Rust, one static musl binary**: `helpers/linux/autotrack-helper --probe|--shots|--ocr`,
+  the same protocol. It has zero runtime deps: pure-Rust D-Bus (zbus), X11 (x11rb with MIT-SHM,
+  RandR and XFixes) and JPEG (jpeg-encoder). One file runs on every distro. Its RSS is a few MB.
+  Not C: it would link libatspi, glib and libjpeg dynamically, and libjpeg's soname differs
+  (Ubuntu `.so.8`, Fedora `.so.62`). Not Go: a GC runtime at 10+ MB RSS, and its stdlib JPEG
+  encoder is about 3x slower on the hot `save` path. CI builds it with
+  `cargo build --release --target x86_64-unknown-linux-musl`.
+- **Probe over AT-SPI (D-Bus)**:
+  - The a11y bus comes from `org.a11y.Bus.GetAddress`. The probe sets `org.a11y.Status.IsEnabled`
+    once, so Chromium, Electron and Qt build their trees (Mac's `AXManualAccessibility`, here).
+    `AUTOTRACK_PROBE_NO_ENHANCE=1` turns that off.
+  - `at`: the topmost X11 client window at the point (`_NET_CLIENT_LIST_STACKING`), then its
+    `_NET_WM_PID`, then the AT-SPI app on that pid (`GetConnectionUnixProcessID`), then the frame
+    holding the point, then `Component.GetAccessibleAtPoint` down to the deepest element.
+  - `focused`: `object:state-changed:focused` events keep the last focused object. Each ask re-reads
+    it and checks it still has `FOCUSED`, so a stale answer cannot hide a password field. Without
+    an event, it falls back to `Collection.GetMatches` on the active frame, then a bounded walk.
+  - `secure` = role `password text` (GTK, Qt, Chromium and Firefox all use it).
+  - Names: text roles (`text`, `entry`, `password text`, `terminal`, `combo box`, `document *`) take
+    their name only from their label (`LABELLED_BY`), so their text is never read. Other roles drop
+    a name that shows their `Value` (the Windows rule), then fall back to the label.
+  - `front`: `_NET_ACTIVE_WINDOW`, `_NET_WM_PID`. `app.id` = `/proc/<pid>/exe`. `app.name` = the
+    `WM_CLASS` class, else `comm`. The title comes from `_NET_WM_NAME`, and the bounds include
+    `_NET_FRAME_EXTENTS`. `dialog`: window type `DIALOG` or state `MODAL`, with words from its
+    AT-SPI labels and buttons. `windows`: the client windows on the same pid.
+  - Lock: `org.gnome.ScreenSaver` or `org.freedesktop.ScreenSaver` `GetActive`. While it is locked,
+    `front` answers app `lockscreen`, which the gate treats as locked.
+  - Clipboard: XFixes selection-owner events on `CLIPBOARD`. `types` is the owner's `TARGETS`. The
+    copy is concealed when `TARGETS` has `x-kde-passwordManagerHint` (KeePassXC, KDE). Text comes
+    from `UTF8_STRING`, 4,096 characters at most. A transfer big enough for `INCR` gives its length
+    only.
+  - `tree`: the front app's active frame, the same skip and leaf rules, mapped to AT-SPI roles.
+- **Coordinates**: on X11, points are X pixels, so coords are the identity, `displays[].os.scale`
+  is 1 and `scale` = frame pixels / display pixels.
+- **Shots**: RandR 1.5 monitors (one display the size of the root without it). The grab is an
+  MIT-SHM `GetImage` of the display (plain `GetImage` when SHM is missing), box-filtered down to
+  1920 px at most. The hash is the same as Mac and Windows; the JPEG goes to `path.tmp`, then
+  rename. `crop` is a `GetImage` of the rect at native pixels.
+- **OCR is tesseract, when installed** (`apt install tesseract-ocr`, `dnf install tesseract`). The
+  helper runs `tesseract <image> stdout tsv` at nice 10 with `OMP_THREAD_LIMIT=1` and groups words
+  into lines; `conf` is the words' mean / 100. Its `cpuMs` counts the children. Without
+  tesseract, Node starts no OCR helper and a segment's images count as skipped at `.done`.
+  `doctor` says how to install it. It is not bundled: a 30 MB engine plus language data that every
+  distro packages.
+- **Governor**: power from `/sys/class/power_supply`: AC when a `Mains` or `USB` supply is
+  `online`, battery from a `Battery`'s `capacity`. Busy is `/proc/loadavg` per core over 0.85, as
+  on Mac.
+- **Autostart**: a systemd user service when `graphical-session.target` is active (GNOME, KDE):
+  `~/.config/systemd/user/autotrack.service`, `PartOf` and `After` that target,
+  `Restart=on-failure`. Otherwise an XDG autostart entry, `~/.config/autostart/autotrack.desktop`.
+  Both run `node dist/cli.js start`. install.sh imports `DISPLAY` and `XAUTHORITY` into the user
+  manager before it starts the service. `autotrack uninstall` disables and removes both.
+- **Browser host**: manifests in `~/.config/{google-chrome,chromium,microsoft-edge,BraveSoftware/Brave-Browser}/NativeMessagingHosts/`.
+- **Excluded apps** gain Seahorse (GNOME "Passwords and Keys"). KeePassXC was already there.
+- **Notify and prompt**: `notify-send`, else `gdbus` to `org.freedesktop.Notifications`. The task
+  prompt is `zenity --entry`, else `kdialog --inputbox`; with neither, `autotrack task` says so.
+- **Data**: `$XDG_DATA_HOME/autotrack` (default `~/.local/share/autotrack`). The CLI shim is in
+  `~/.local/bin`.
+
+Installer: `autotrack-<version>-linux-x64.run`, a POSIX sh header followed by a tar.gz payload (the
+bundle, its `SHA256SUMS`, `install.sh`). It installs per user with no root. It asks for the code
+with zenity, then kdialog, then the terminal, checks it (`AUTOTRACK_STEP=check`) before changing
+anything, then runs `install.sh`. `--uninstall` runs `autotrack uninstall`.
+
+- Not AppImage: AppImage is for apps that run from the image, and it needs FUSE 2, which Ubuntu
+  22.04 and later do not install. It would still have to copy itself into the data dir.
+- Not .deb or .rpm: they install system-wide as root, need two formats, and their scripts run
+  outside the person's session (Mac's pkg problem).
+- A download loses its execute bit, so run it with `sh autotrack-<version>-linux-x64.run`, or
+  right-click, Properties, "Allow executing as program", then double-click.
+- No UI (CI): `AUTOTRACK=<code>` or `AUTOTRACK_CODE_FILE=<path>` in the environment. No dialogs.
+
+install.sh (the one-liner) handles Linux too. It checks with `sha256sum`, then writes the shim,
+the autostart and the browser hosts. Browser steps open with `xdg-open`, and the folder is copied
+with `xclip` or `wl-copy` when one is there. It runs `doctor` and prints the Wayland fix when that
+applies.
+
+Tests: unit tests for the Linux pieces (power, busy, autostart, uninstall, host paths, notify,
+prompt, OCR gating), plus `cargo test` for the helper (hash, fit, JSON, the name rule, TSV).
+`ci.yml` has a Linux e2e on ubuntu-latest: Xvfb, openbox, a D-Bus session with at-spi2, a GTK3
+form (python3-gi) with a password field and a Submit button, `xdotool` for input, `xclip` and
+tesseract. It enforces the budget as Windows does: fail past 6% CPU over the 10 s burst or 200 MB
+RSS. `release.yml` builds the linux-x64 bundle and the `.run`; its smokes install both from the
+published release.
+
+Known limits:
+
+- Wayland is degraded (above).
+- HiDPI on X11 (GNOME 200%, `GDK_SCALE=2`): toolkits can report AT-SPI extents in their own
+  logical pixels, so element boxes can be off by the scale. Frames and clicks are right.
+- GTK4 has no `Collection`; with no focus event yet, `focused` walks the frame (bounded).
+- Lock detection needs a screensaver that speaks `org.gnome.ScreenSaver` or
+  `org.freedesktop.ScreenSaver` (GNOME, KDE, Xfce, Cinnamon, MATE do).
+- Arm64 Linux is not built.
+
 ## Decision log
 
 - Node + `uiohook-napi` over Rust: same language and redaction rules as autobrowse, the library
@@ -700,3 +818,10 @@ Known limits:
 - A 10 s burst rule in the governor (2026-10-14): the 60 s window turned lean a minute after the
   burst ended. Stepping down one level keeps crops at `normal`; only a burst past twice the
   budget drops them.
+- A Rust helper on Linux, static musl (2026-10-13): one file for every distro with no runtime deps
+  (no libatspi, glib or libjpeg, whose soname differs by distro) and a few MB of RSS. Go's GC
+  runtime and slower stdlib JPEG lost; so did C's dynamic links.
+- A self-extracting `.run` on Linux over AppImage or .deb (2026-10-13): per user like the other
+  two, no FUSE, no root, one file for every distro, and it reuses `install.sh` unchanged.
+- Wayland degraded over a portal port (2026-10-13): no passive global input exists there, so a
+  portal would bring frames back and nothing else. `doctor` names the X11 session to pick.
