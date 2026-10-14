@@ -169,7 +169,7 @@ case ",$soft," in
 *,screen,*) echo "::warning::e2e: no Screen Recording: no frames to read" ;;
 *)
   i=0
-  until find "$data/sessions" -path '*/ocr/*.json' -exec grep -lE '"text":"[^"]*([Hh]ello|Submit)' {} + 2>/dev/null | grep -q .; do
+  until find "$data/sessions" -path '*/ocr/*.json' -exec grep -lE '"text":"[^"]*([Hh]ello|Submit|Password|note\.txt)' {} + 2>/dev/null | grep -q .; do
     i=$((i + 1))
     if [ $i -ge 60 ]; then
       echo "::warning::e2e: no OCR with the known text after 180 s"

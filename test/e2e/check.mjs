@@ -379,17 +379,24 @@ check(
 );
 
 const readOcr = [...ocr.entries()].filter(([, o]) => Array.isArray(o.lines));
-const knownText = readOcr.filter(([, o]) => o.lines.some((l) => /hello|submit/i.test(l.text)));
+// Text the e2e put on screen: what it typed, the form's labels, the editor's title.
+const KNOWN = /hello|submit|password|notepad|note\.txt/i;
+const knownText = readOcr.filter(([, o]) => o.lines.some((l) => KNOWN.test(l.text)));
 console.log(
   `      ocr: ${ocr.size} file(s), ${readOcr.length} read; known text in ${knownText.map(([k]) => k).join(", ") || "none"}`,
 );
+if (!knownText.length)
+  for (const [k, o] of readOcr)
+    console.log(
+      `      ocr ${k}: ${JSON.stringify(o.lines.slice(0, 6).map((l) => l.text.slice(0, 40)))}`,
+    );
 check(
   readOcr.every(([, o]) =>
     o.lines.every((l) => typeof l.text === "string" && [l.x, l.y, l.w, l.h].every(Number.isFinite)),
   ),
   "every OCR line has text and a box",
 );
-check(knownText.length > 0, `OCR read the known text ("hello" or "Submit")`, "screen");
+check(knownText.length > 0, `OCR read known text (${KNOWN.source})`, "screen");
 
 // Never soft: whatever was or wasn't captured, the password must not be anywhere.
 check(

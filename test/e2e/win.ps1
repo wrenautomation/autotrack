@@ -215,7 +215,7 @@ try {
     for ($i = 0; $true; $i++) {
         $hit = Get-ChildItem -Path $sessionsDir -Recurse -Filter '*.json' -ErrorAction SilentlyContinue |
             Where-Object { $_.Directory.Name -eq 'ocr' } |
-            Where-Object { (Get-Content $_.FullName -Raw) -match '"text":"[^"]*(hello|Submit)' } | Select-Object -First 1
+            Where-Object { (Get-Content $_.FullName -Raw) -match '"text":"[^"]*(hello|Submit|Password|Notepad)' } | Select-Object -First 1
         if ($hit) { Write-Host "ocr: known text in $($hit.FullName)"; break }
         if ($i -ge 60) { Write-Host '::warning::e2e: no OCR with the known text after 180 s'; break }
         Start-Sleep -Seconds 3
