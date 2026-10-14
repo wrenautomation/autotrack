@@ -789,6 +789,102 @@ Known limits:
   `org.freedesktop.ScreenSaver` (GNOME, KDE, Xfce, Cinnamon, MATE do).
 - Arm64 Linux is not built.
 
+## Updates and fleet health (2026-10-14, William)
+
+"a whole installer / system for windows and linux and later mac with auto updates, clean
+installation, etc. so i dont have to worry about that." The installers exist. This adds the rest:
+the recorder updates itself, rolls back a bad update, and reports in, so a dead device shows up
+without asking anyone. Windows and Linux now. Mac later (see the last point).
+
+Layout (Windows and Linux):
+
+- `<data>/versions/<version>/` holds one unpacked bundle each. `<data>/app` points at the current
+  one: a directory junction on Windows (no admin needed), a symlink on Linux. Every path that
+  installs write (task, unit, PATH, `autotrack.cmd`, browser host manifest) goes through `app`, so
+  none of them change on an update.
+- Swapping `app` never touches files in use. A running process keeps its files open in the old
+  version folder. A browser host from the old version runs on until the browser restarts it.
+- Only the current and the previous version are kept. A folder still in use stays until the next
+  cleanup.
+- The Windows launcher moves out of the bundle to `<data>/autotrack.vbs`, so an update can't remove
+  it. The installers move an old real `app` folder into `versions/` the first time.
+
+Release trust:
+
+- Each release adds `release.json` (`{version, files: {<asset>: <sha256>}}`) and
+  `release.json.sig`, an Ed25519 signature over its bytes. CI signs with the secret
+  `AUTOTRACK_SIGNING_KEY`. The public key is in `src/update.ts`. The private key is backed up in
+  the autobrowse store.
+- The updater refuses a bad signature, a version that is not newer (no downgrades), a version
+  marked bad, and an asset whose SHA-256 doesn't match. `AUTOTRACK_UPDATE_URL` (a folder or URL
+  holding those files) and `AUTOTRACK_UPDATE_KEY` (a public key) are for tests. Changing the
+  environment needs code execution anyway, so they open nothing new.
+- Install scripts keep checking `SHA256SUMS`. PowerShell 5.1 has no Ed25519, and the scripts come
+  from the same repo.
+
+Update flow, inside the recorder:
+
+1. Check 2 to 10 minutes after start, then every 6 hours (±30 minutes). Source:
+   `releases/latest/download/`, which skips prereleases.
+2. Newer: download the platform bundle, verify it, unpack into `versions/<v>.tmp`, rename to
+   `versions/<v>`.
+3. `selftest` with the new version's own node: loads the native modules, asks the helper for its
+   version, reads the config, prints the version. It must exit 0 within 60 s, or the version is
+   marked bad.
+4. Wait for 2 minutes with no input, or apply anyway after 24 hours. Then repoint `app`, write
+   `update.json` (`{pending, previous, boots: 0}`), re-unpack the extension (best effort), close
+   the segment and exit 75.
+5. The launcher restarts it. The Windows `.vbs` loop restarts at once on 75. systemd has
+   `Restart=on-failure` with `RestartSec=10`. Both set `AUTOTRACK_SUPERVISED=1`. Without it (the
+   XDG autostart fallback), the recorder starts the new version detached, then exits.
+
+Rollback:
+
+- Early in `start`, before anything that could fail on a bad build: if `update.json` names this
+  version as pending, count a boot. On the fourth boot, repoint `app` to `previous`, mark the
+  version bad and exit 75.
+- After 10 minutes up, the version is good: `pending` clears and old versions are pruned.
+- A crash before that boot check runs is caught earlier, by `selftest`.
+
+Control:
+
+- `config.json` `update`: `auto` (default) or `off`. `AUTOTRACK_UPDATE=off` overrides.
+- `autotrack update` checks and applies now. `--check` only reports. `status` and `doctor` show
+  the version, the last check and any update error.
+
+Heartbeat:
+
+- At start, before an update restart, and every 15 minutes, the recorder puts
+  `<device>/heartbeat.json`. It holds: `v: 1`, `version`, `platform`, `arch`, `os`, `at`,
+  `startedAt`, `paused`, `level`, `waiting {segments, bytes}`,
+  `ship {at, ok, error}`, `update {checkedAt, latest, state, error}`.
+- `parseKey` ignores it (it is not under a session), so `list` never shows it. A failed put is
+  logged and retried on the next beat.
+- autobrowse `autotrack devices` reads each device's heartbeat and shows version, last seen and
+  problems.
+- The desk checks hourly. If a device has been silent for over 24 hours, it posts once to the ops
+  Discord lane, with no ping, naming the device, its last version and last seen. A device enrolled
+  over 24 hours ago that never beat counts too. It posts again when the device comes back.
+  `<state>/autotrack-health.json` keeps it from repeating.
+
+Mac, later: macOS ties Accessibility, Input Monitoring and Screen Recording to the exact node
+binary. A new binary after every update means granting all three again. So the Mac keeps its real
+`app` folder and the updater stays off there until the bundle is signed with a Developer ID. The
+heartbeat runs on the Mac too.
+
+Tests:
+
+- Unit: version compare, signature checks (good, tampered, wrong key), asset choice, the
+  pending → boots → rollback logic, the link swap in a temp dir, and the heartbeat body.
+- `ci.yml` `update` job on Windows and Linux:
+  - Install the fresh bundle.
+  - Build a fake 9.9.9 from it (package.json bumped), sign it with a throwaway key, serve it from
+    a folder, and run `autotrack update`. `app` must point at 9.9.9 and the running recorder must
+    report 9.9.9.
+  - Then a 9.9.10 that passes `selftest` but exits on `start`. It must roll back to 9.9.9 and be
+    marked bad.
+  - Then uninstall leaves nothing.
+
 ## Decision log
 
 - Node + `uiohook-napi` over Rust: same language and redaction rules as autobrowse, the library
