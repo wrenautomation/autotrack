@@ -316,6 +316,7 @@ describe("Heart", () => {
     startedAt: "2026-10-14T00:00:00.000Z",
     paused: null,
     level: "full",
+    memoryRestarts: { count: 0, last: null },
     waiting: { segments: 0, bytes: 0 },
     ship: null,
     update: null,

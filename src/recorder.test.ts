@@ -741,6 +741,62 @@ describe("recorder quality", () => {
     expect(r.rec.status()).toMatchObject({ level: "lean", why: "system busy: load 0.95 per core" });
   });
 
+  it("a helper over the memory cap is restarted, with a restart event", async () => {
+    const recycled: [string, string][] = [];
+    let probeMb = 120;
+    let up = true;
+    const r = setup({
+      deps: {
+        helperUsage: async () => ({
+          probe: { cpuMs: 10, rssMb: 14, footprintMb: probeMb },
+          shots: { cpuMs: 10, rssMb: 60 }, // no footprint (Windows, Linux): RSS counts
+        }),
+        recycleHelper: (h, why) => {
+          recycled.push([h, why]);
+          return up;
+        },
+      },
+    });
+    await r.rec.levelTick();
+    expect(recycled).toEqual([]);
+    probeMb = 1020; // RSS stays low: the footprint is what counts
+    await r.rec.levelTick();
+    up = false; // the restart was refused (down, or up under a minute): no event
+    await r.rec.levelTick();
+    await r.rec.stop();
+    expect(recycled).toEqual([
+      ["probe", "memory 1020 MB over the 300 MB cap"],
+      ["probe", "memory 1020 MB over the 300 MB cap"],
+    ]);
+    expect(r.events(true).filter((e) => e.kind === "restart")).toMatchObject([
+      { kind: "restart", helper: "probe", why: "memory 1020 MB over the 300 MB cap", mb: 1020 },
+    ]);
+    expect(r.rec.status().memoryRestarts).toMatchObject({
+      count: 1,
+      last: { helper: "probe", why: "memory 1020 MB over the 300 MB cap" },
+    });
+  });
+
+  it("the cap is configurable and counts RSS where there is no footprint", async () => {
+    const recycled: string[] = [];
+    const r = setup({
+      deps: {
+        helperCapMb: 50,
+        helperUsage: async () => ({
+          probe: { cpuMs: 1, rssMb: 20 },
+          shots: { cpuMs: 1, rssMb: 60 },
+        }),
+        recycleHelper: (h) => {
+          recycled.push(h);
+          return true;
+        },
+      },
+    });
+    await r.rec.levelTick();
+    await r.rec.stop();
+    expect(recycled).toEqual(["shots"]);
+  });
+
   it("a pinned level holds", async () => {
     const r = setup({ deps: { pinned: "lean", busy: () => ({ busy: false, why: "calm" }) } });
     await r.rec.levelTick();

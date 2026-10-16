@@ -24,7 +24,7 @@ import {
   type SessionMeta,
   type WindowInfo,
 } from "./events.ts";
-import type { Usage } from "./helper.ts";
+import { HELPER_CAP_MB, overCap, type Usage } from "./helper.ts";
 import { Journal, type Reservation } from "./journal.ts";
 import { type Busy, type Decision, Governor, LEVEL_TICK_MS, LEVELS, type Power } from "./level.ts";
 import { OCR_TICK_MS, type OcrReader, OcrScheduler } from "./ocr.ts";
@@ -132,6 +132,10 @@ export interface RecorderDeps {
   helperUsage?: () => Promise<Record<string, Usage | null>>;
   /** How many times each helper has been started. */
   helperStarts?: () => Record<string, number>;
+  /** Restart a helper now (over the memory cap); false when it was not restarted. */
+  recycleHelper?: (helper: string, why: string) => boolean;
+  /** A helper's memory past this (MB) restarts it. Default `HELPER_CAP_MB`. */
+  helperCapMb?: number;
   /** `AUTOTRACK_LEVEL`: hold this level. */
   pinned?: Level | null;
   /** Start an OCR helper run; none: no OCR (segments get `.done` at close). */
@@ -155,6 +159,12 @@ interface Ctx {
   tree: number | null;
   /** The act's point in the probe's coordinates, for asking again. */
   at?: { x: number; y: number };
+}
+
+export interface MemoryRestart {
+  helper: string;
+  why: string;
+  at: string;
 }
 
 export interface Status {
@@ -181,6 +191,8 @@ export interface Status {
   inputs: number;
   /** Each helper's cumulative CPU ms and resident MB at the last level tick (or `statusNow`). */
   helpers: Record<string, Usage | null>;
+  /** Helper restarts for memory since start, and the last one. */
+  memoryRestarts: { count: number; last: MemoryRestart | null };
   ocr: { on: boolean; waiting: number; running: boolean; cpuMs: number };
 }
 
@@ -267,6 +279,7 @@ export class Recorder {
   private openCrops = new Set<Crop>();
   private dropped = 0;
   private helpers: Record<string, Usage | null> = {};
+  private memoryRestarts: { count: number; last: MemoryRestart | null } = { count: 0, last: null };
   readonly governor: Governor;
   readonly ocr: OcrScheduler | null;
 
@@ -413,6 +426,7 @@ export class Recorder {
         this.governor.burstPct === null ? null : Math.round(this.governor.burstPct * 100) / 100,
       inputs: this.inputs,
       helpers: this.helpers,
+      memoryRestarts: this.memoryRestarts,
       ocr: {
         on: this.ocr !== null,
         waiting: this.ocr?.waiting ?? 0,
@@ -435,11 +449,13 @@ export class Recorder {
 
   /**
    * Every 2 s: the governor's reading; a `level` event when the level changed (the first tick
-   * always writes one). Helper restarts go into the segment's stats.
+   * always writes one). A helper over the memory cap is restarted. Helper restarts go into the
+   * segment's stats.
    */
   async levelTick(): Promise<Decision | null> {
     if (this.stopped) return null;
     const d = await this.governor.tick();
+    if (!this.stopped) this.capHelpers();
     const starts = this.d.helperStarts?.();
     if (starts) this.journal.stats.helperStarts(starts);
     if (!d || this.stopped) return d;
@@ -451,6 +467,26 @@ export class Recorder {
       ),
     );
     return d;
+  }
+
+  /**
+   * Restart each helper the last usage reading put over the cap, with a `restart` event saying
+   * why. The reading is the governor's (every 2 s), so this adds no asks.
+   */
+  private capHelpers(): void {
+    const cap = this.d.helperCapMb ?? HELPER_CAP_MB;
+    for (const { helper, mb } of overCap(this.helpers, cap)) {
+      const why = `memory ${mb} MB over the ${cap} MB cap`;
+      if (!this.d.recycleHelper?.(helper, why)) continue;
+      this.helpers[helper] = null; // that reading is of the old process
+      this.memoryRestarts = {
+        count: this.memoryRestarts.count + 1,
+        last: { helper, why, at: new Date(this.clock.epoch()).toISOString() },
+      };
+      const t = this.t(this.clock.now());
+      const e: Event = { kind: "restart", helper, why, mb, t, ts: this.ts(t) };
+      this.side(t, () => this.enqueue(async () => this.write(e)));
+    }
   }
 
   /** A frame was written: its `shot` event, and it joins the OCR queue. */

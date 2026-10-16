@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { HELPER_CAP_MB, overCap } from "./helper.ts";
 import { clipboardOf, helperCommand, Probe, type ProbeChild, TREE_NODES } from "./probe.ts";
 
 /** A fake helper: records requests; the test answers when and how it likes. */
@@ -95,6 +96,46 @@ describe("probe client", () => {
     child().answer({ id: 2, element: null });
     expect(await second).toEqual({ id: 2, element: null });
     probe.close();
+  });
+
+  it("usage passes the footprint through; overCap counts it over RSS", async () => {
+    const { probe, child } = setup({ timeoutMs: 1000 });
+    const u = probe.usage();
+    await tick();
+    child().answer({ id: 1, cpuMs: 5, rssMb: 14, footprintMb: 1020 });
+    expect(await u).toEqual({ cpuMs: 5, rssMb: 14, footprintMb: 1020 });
+    expect(overCap({ probe: await u, shots: { cpuMs: 1, rssMb: 40 }, ocr: null })).toEqual([
+      { helper: "probe", mb: 1020 },
+    ]);
+    expect(overCap({ shots: { cpuMs: 1, rssMb: 301 } })).toEqual([{ helper: "shots", mb: 301 }]);
+    expect(overCap({ shots: { cpuMs: 1, rssMb: 300 } })).toEqual([]);
+    expect(HELPER_CAP_MB).toBe(300);
+    probe.close();
+  });
+
+  it("recycle kills a helper up a minute, which then starts again", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const log = vi.fn();
+    const children: FakeChild[] = [];
+    const probe = new Probe({
+      spawn: () => {
+        const c = new FakeChild();
+        children.push(c);
+        return c;
+      },
+      restartMs: 10,
+      log,
+    });
+    expect(probe.recycle("memory 400 MB over the 300 MB cap")).toBe(false); // just started
+    vi.advanceTimersByTime(61_000);
+    expect(probe.recycle("memory 400 MB over the 300 MB cap")).toBe(true);
+    expect(children[0]?.killed).toBe(true);
+    expect(log).toHaveBeenCalledWith("probe.restart: memory 400 MB over the 300 MB cap");
+    vi.advanceTimersByTime(10);
+    expect(children.length).toBe(2);
+    expect(probe.running).toBe(true);
+    probe.close();
+    expect(probe.recycle("x", 0)).toBe(false); // closed
   });
 
   it("skips garbage lines", async () => {

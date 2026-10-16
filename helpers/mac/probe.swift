@@ -5,7 +5,7 @@
 // `probe --shots` is the same binary as a second process that only takes screen frames (ops grab,
 // save, crop, displays; see "Shots protocol"), so a capture never delays a probe answer.
 // `probe --ocr` is a third, started on demand: op read {path} runs Vision text recognition on one
-// image at background QoS. Every mode answers `usage` (its own CPU ms and resident MB).
+// image at background QoS. Every mode answers `usage` (its own CPU ms, resident MB and footprint MB).
 // Never returns an element's value, nor a name that shows it (a text field named by its content).
 // Coordinates: global points, origin top-left (same as uiohook).
 // Elements also carry path (ancestors up to the window), id, cls, url, help; each omitted when empty.
@@ -734,7 +734,20 @@ func opCrop(_ req: [String: Any]) -> [String: Any] {
     return ["ok": true, "bytes": stat(path, &st) == 0 ? Int(st.st_size) : 0, "w": img.width, "h": img.height]
 }
 
-/// This process's cumulative CPU ms (user + system) and resident MB.
+/// Physical footprint MB (what Activity Monitor shows as Memory): unlike resident size it keeps
+/// counting pages that were compressed or swapped out, so a leak can't hide under memory pressure.
+func footprintMb() -> Double? {
+    var info = task_vm_info_data_t()
+    var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+    let kr = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+        }
+    }
+    return kr == KERN_SUCCESS ? Double(info.phys_footprint) / 1_048_576 : nil
+}
+
+/// This process's cumulative CPU ms (user + system), resident MB and footprint MB.
 func opUsage() -> [String: Any] {
     var ru = rusage()
     getrusage(RUSAGE_SELF, &ru)
@@ -748,7 +761,9 @@ func opUsage() -> [String: Any] {
         }
     }
     let rss = kr == KERN_SUCCESS ? Double(info.resident_size) / 1_048_576 : 0
-    return ["cpuMs": cpu.rounded(), "rssMb": rss.rounded()]
+    var out: [String: Any] = ["cpuMs": cpu.rounded(), "rssMb": rss.rounded()]
+    if let fp = footprintMb() { out["footprintMb"] = fp.rounded() }
+    return out
 }
 
 func cpuNowMs() -> Double { (opUsage()["cpuMs"] as? Double) ?? 0 }
@@ -820,12 +835,15 @@ func emit(_ res: [String: Any]) {
     emitLock.unlock()
 }
 
+// No run loop drains the main thread's pool, so each request gets its own, parsing included: the
+// parse outside it kept ~4.7 KB a request alive (1 GB over 44 h on 10-16).
 func serve(_ handler: ([String: Any]) -> [String: Any]?) {
     while let line = readLine() {
-        guard let data = line.data(using: .utf8),
-              let req = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
-        // no run loop here: free CG's autoreleased images per request
-        if let res = autoreleasepool(invoking: { handler(req) }) { emit(res) }
+        autoreleasepool {
+            guard let data = line.data(using: .utf8),
+                  let req = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+            if let res = handler(req) { emit(res) }
+        }
     }
     treeQueue.sync {}  // a tree asked for just before stdin closed still answers
 }

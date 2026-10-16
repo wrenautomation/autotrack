@@ -3,6 +3,7 @@
  * before an update restart and every 15 minutes. autobrowse reads it (`autotrack devices`) and
  * the desk posts when one goes silent. Not under a session, so nothing that reads sessions sees it.
  */
+import type { MemoryRestart } from "./recorder.ts";
 import type { ObjectStore } from "./ship.ts";
 import type { UpdaterStatus } from "./update.ts";
 
@@ -24,6 +25,8 @@ export interface Heartbeat {
   startedAt: string;
   paused: string | null;
   level: string | null;
+  /** Helpers restarted for passing the memory cap since start, and the last one. */
+  memoryRestarts: { count: number; last: MemoryRestart | null };
   waiting: { segments: number; bytes: number };
   ship: ShipStatus | null;
   update: Pick<UpdaterStatus, "checkedAt" | "latest" | "state" | "error"> | null;

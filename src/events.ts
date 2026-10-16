@@ -190,6 +190,8 @@ export type Event = Base &
     | { kind: "shot"; frame: number; at: number; x: number; y: number; display: string }
     /** Quality: the capture level from here on, and the input that decided it. */
     | { kind: "level"; level: Level; why: string }
+    /** A helper (`probe`, `shots`) was restarted: its memory (MB) passed the cap. */
+    | { kind: "restart"; helper: string; why: string; mb: number }
   );
 
 /**

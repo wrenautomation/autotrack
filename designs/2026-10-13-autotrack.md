@@ -544,7 +544,7 @@ Where the build is more exact than the bullets above. Field names are unchanged.
   no recorder running, and uninstall, finish them first and count unread images as skipped.
 - Ship: `crops/<n>.jpg`, `ocr/<n>.json.gz`, `ocr/c<n>.json.gz` and `stats.json` go up before
   `events.jsonl.gz`. The local cap deletes crops along with frames, oldest first.
-- Every helper mode answers `usage` → `{cpuMs, rssMb}` (its own CPU and RSS). The status op adds
+- Every helper mode answers `usage` → `{cpuMs, rssMb}` (its own CPU and RSS; Mac adds `footprintMb`). The status op adds
   `level`, `why`, `cpuPct`, `helpers` and `ocr: {on, waiting, running, cpuMs}`. `doctor` prints
   the level and why, then CPU and RSS split into recorder, probe and shots, then OCR CPU on its
   own line.
@@ -856,8 +856,8 @@ Heartbeat:
 
 - At start, before an update restart, and every 15 minutes, the recorder puts
   `<device>/heartbeat.json`. It holds: `v: 1`, `version`, `platform`, `arch`, `os`, `at`,
-  `startedAt`, `paused`, `level`, `waiting {segments, bytes}`,
-  `ship {at, ok, error}`, `update {checkedAt, latest, state, error}`.
+  `startedAt`, `paused`, `level`, `memoryRestarts {count, last {helper, why, at}}`,
+  `waiting {segments, bytes}`, `ship {at, ok, error}`, `update {checkedAt, latest, state, error}`.
 - `parseKey` ignores it (it is not under a session), so `list` never shows it. A failed put is
   logged and retried on the next beat.
 - autobrowse `autotrack devices` reads each device's heartbeat and shows version, last seen and
@@ -884,6 +884,39 @@ Tests:
   - Then a 9.9.10 that passes `selftest` but exits on `start`. It must roll back to 9.9.9 and be
     marked bad.
   - Then uninstall leaves nothing.
+
+## Helper memory (2026-10-16)
+
+On William's Mac the probe reached ~1.0 GB and `probe --shots` ~0.7 GB after 44 h, and the Mac
+swapped 14 of 15 GB.
+
+Cause, measured: the Mac helper parsed each request outside its autorelease pool. Nothing drains
+the main thread's pool (no run loop), so every request kept ~4.7 KB, whatever the op (`usage`
+leaked the same as `at`). Live after a restart: probe 6.7 → 16 MB and shots 45 → 52 MB in 16
+minutes of use, ~34 and ~26 MB an hour. Resident size hid it: the leaked pages were compressed,
+so the probe showed 15 MB RSS at 50 MB footprint.
+
+Fix:
+
+- `serve` runs parse, handle and answer inside one pool per request. Measured 0.00 KB a request
+  after it, every op.
+- `usage` also answers `footprintMb` on Mac (`TASK_VM_INFO` `phys_footprint`, what Activity
+  Monitor shows), which counts compressed and swapped pages.
+- Guard: the recorder already reads each helper's usage every 2 s for the governor. A helper whose
+  memory (footprint on Mac, RSS elsewhere) passes 300 MB (`HELPER_CAP_MB`, `helperCapMb`) is
+  killed and started again. It is skipped if it has been up under a minute. Each restart logs
+  `<helper>.restart: memory N MB over the 300 MB cap` and writes a
+  `{kind: "restart", helper, why, mb}` event. The heartbeat carries `memoryRestarts`, and
+  autobrowse `autotrack devices` lists it as a problem.
+- Helper tests (CI) fail if the footprint grows 3 MB or more over 5,000 probe or 3,000 shots
+  requests.
+
+Soak on this Mac (read-only asks, no input sent), requests back to back:
+
+| helper | before the fix | after |
+|---|---|---|
+| probe (`front`, `at`, `focused`, a tree every 50) | 9.3 → 63 MB over 11,700 asks, 9 min | 5.8 → 6.3 MB over 23,300 asks, 16 min |
+| shots (`grab`, a save every 5th, a crop every 20th) | 43 → 58 MB over 2,650 grabs, 9 min | 43 → 43 MB over 5,750 grabs, 16 min |
 
 ## Decision log
 
@@ -930,5 +963,7 @@ Tests:
   runtime and slower stdlib JPEG lost; so did C's dynamic links.
 - A self-extracting `.run` on Linux over AppImage or .deb (2026-10-13): per user like the other
   two, no FUSE, no root, one file for every distro, and it reuses `install.sh` unchanged.
+- The memory cap rides the governor's 2 s usage read (2026-10-16), not the 15 min heartbeat: no
+  new asks, and a fast leak is caught within seconds. The heartbeat only reports it.
 - Wayland degraded over a portal port (2026-10-13): no passive global input exists there, so a
   portal would bring frames back and nothing else. `doctor` names the X11 session to pick.

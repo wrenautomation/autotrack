@@ -6,7 +6,8 @@
  * line with `event` and no id is something the helper saw by itself (a clipboard change) and goes
  * to `onEvent`. A crashed helper restarts with backoff (`onStart` runs after each start, so a
  * watch can be asked for again); a missing helper makes every call `null` at once. The probe and
- * the shots client are two children of the same helper, built on this.
+ * the shots client are two children of the same helper, built on this. One whose memory passes
+ * `HELPER_CAP_MB` is restarted by the recorder (`recycle`), so a leak can't eat the machine.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -67,6 +68,24 @@ export function spawnHelper(cmd: { cmd: string; args: string[] }): () => HelperC
 export interface Usage {
   cpuMs: number;
   rssMb: number;
+  /** Mac: physical footprint, which keeps counting pages compressed or swapped out (RSS doesn't). */
+  footprintMb?: number;
+}
+
+/** A helper past this is restarted. Idle they sit at 5-50 MB (the shots ring is ~37 MB). */
+export const HELPER_CAP_MB = 300;
+
+/** A helper's memory: its footprint where the OS has one, else its RSS. */
+export const memMb = (u: Usage): number => u.footprintMb ?? u.rssMb;
+
+/** The helpers over the cap, by name, with their memory. */
+export function overCap(
+  usage: Record<string, Usage | null>,
+  capMb = HELPER_CAP_MB,
+): { helper: string; mb: number }[] {
+  return Object.entries(usage).flatMap(([helper, u]) =>
+    u && memMb(u) > capMb ? [{ helper, mb: Math.round(memMb(u)) }] : [],
+  );
 }
 
 type Pending = { resolve: (v: unknown) => void; timer: NodeJS.Timeout };
@@ -124,11 +143,27 @@ export class HelperClient {
     });
   }
 
-  /** The helper process's own cost: cumulative CPU ms and resident MB (null: no answer). */
+  /** The helper process's own cost: cumulative CPU ms, resident and footprint MB (null: no answer). */
   async usage(timeoutMs = 2000): Promise<Usage | null> {
     const a = await this.call<Partial<Usage>>("usage", {}, timeoutMs);
     if (typeof a?.cpuMs !== "number" || typeof a.rssMb !== "number") return null;
-    return { cpuMs: a.cpuMs, rssMb: a.rssMb };
+    return {
+      cpuMs: a.cpuMs,
+      rssMb: a.rssMb,
+      ...(typeof a.footprintMb === "number" ? { footprintMb: a.footprintMb } : {}),
+    };
+  }
+
+  /**
+   * Kill the helper so it starts again fresh (it is over the memory cap). False when it is down,
+   * closed, or up for less than `minUpMs` (a fresh one gets its chance).
+   */
+  recycle(why: string, minUpMs = 60_000): boolean {
+    const child = this.child;
+    if (!child || this.closed || Date.now() - this.startedAt < minUpMs) return false;
+    this.opts.log?.(`${this.opts.name ?? "helper"}.restart: ${why}`);
+    child.kill();
+    return true;
   }
 
   close(): void {

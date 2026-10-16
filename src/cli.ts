@@ -152,6 +152,8 @@ async function openRecorder(
       return { probe: p, shots: s };
     },
     helperStarts: () => ({ probe: probe.starts, shots: shots.starts }),
+    recycleHelper: (helper, why) =>
+      helper === "probe" ? probe.recycle(why) : helper === "shots" ? shots.recycle(why) : false,
     pinned: pinnedLevel(process.env.AUTOTRACK_LEVEL),
     ocr: opts.ocr === false ? null : ocrHelper(opts.log),
   });
@@ -297,6 +299,7 @@ async function start(data: string): Promise<number> {
         startedAt,
         paused: st.paused,
         level: st.level,
+        memoryRestarts: st.memoryRestarts,
         waiting: { segments: shipCountSegments(sessions).closed, bytes: dirBytes(sessions) },
         ship: lastShip,
         update: {

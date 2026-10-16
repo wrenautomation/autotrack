@@ -93,7 +93,18 @@ if (focused.element) check(isElement(focused.element), "focused element shape");
 console.log("focused", JSON.stringify(focused));
 
 const usage = await ask({ op: "usage" });
-check(usage.cpuMs >= 0 && usage.rssMb > 0, `usage shape: ${JSON.stringify(usage)}`);
+check(
+  usage.cpuMs >= 0 && usage.rssMb > 0 && usage.footprintMb > 0,
+  `usage shape: ${JSON.stringify(usage)}`,
+);
+
+// Flat memory: 5,000 requests. The pool-less parse kept ~4.7 KB each (~23 MB here).
+for (let i = 0; i < 200; i++) await ask({ op: "usage" });
+const fp0 = (await ask({ op: "usage" })).footprintMb;
+for (let i = 0; i < 5000; i++) await ask({ op: i % 2 ? "usage" : "front" });
+const fp1 = (await ask({ op: "usage" })).footprintMb;
+console.log(`footprint over 5000 requests: ${fp0} -> ${fp1} MB`);
+check(fp1 - fp0 < 3, `footprint grew ${fp1 - fp0} MB over 5000 requests`);
 
 const bad = await ask({ op: "nope" });
 check(typeof bad.error === "string", "unknown op answers an error");

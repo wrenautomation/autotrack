@@ -193,12 +193,18 @@ try {
   });
   check(cBad.ok === false && typeof cBad.error === "string", "crop of an unknown display fails");
 
-  // usage: own CPU ms and RSS
+  // usage: own CPU ms, RSS and footprint
   const u = await ask({ op: "usage" });
   check(
-    isNum(u.cpuMs) && u.cpuMs > 0 && isNum(u.rssMb) && u.rssMb > 0,
+    isNum(u.cpuMs) && u.cpuMs > 0 && isNum(u.rssMb) && u.rssMb > 0 && u.footprintMb > 0,
     `usage: ${JSON.stringify(u)}`,
   );
+  // Flat memory: 3,000 small requests (the pool-less parse kept ~4.7 KB each).
+  const f0 = (await ask({ op: "usage" })).footprintMb;
+  for (let i = 0; i < 3000; i++) await ask({ op: i % 2 ? "usage" : "displays" });
+  const f1 = (await ask({ op: "usage" })).footprintMb;
+  console.log(`footprint over 3000 requests: ${f0} -> ${f1} MB`);
+  check(f1 - f0 < 3, `footprint grew ${f1 - f0} MB over 3000 requests`);
 
   // timing
   const grabMs = [];
