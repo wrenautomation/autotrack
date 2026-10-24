@@ -4,5 +4,25 @@
   "files": { "includes": ["**", "!**/node_modules", "!**/dist"] },
   "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
   "linter": { "enabled": true },
-  "javascript": { "formatter": { "quoteStyle": "double", "semicolons": "always" } }
+  "javascript": { "formatter": { "quoteStyle": "double", "semicolons": "always" } },
+  "overrides": [
+    {
+      "includes": ["**", "!src/hook.ts", "!src/runloop.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "uiohook-napi": "src/hook.ts is the one door to the native input module: use uiohook() / startHook() from it, so key names, the Mac run loop pump and tests' fakes stay in one place.",
+                  "koffi": "src/runloop.ts is the one door to koffi (the Mac CFRunLoop drain): add what you need there."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }
