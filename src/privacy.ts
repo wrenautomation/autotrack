@@ -6,7 +6,9 @@
 import type { App, Element, WindowInfo } from "./events.ts";
 
 // Copied from autobrowse src/recorder/redact.ts (SECRET_VALUES): track imports nothing from it.
-const SECRET_VALUES: RegExp[] = [
+// extension/content/redact.js carries the same list for the browser (a classic script, no
+// import); privacy.test.ts checks the two agree pattern for pattern.
+export const SECRET_VALUES: RegExp[] = [
   /\bAKIA[0-9A-Z]{16}\b/, // AWS access key id
   /\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/, // GitHub
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,

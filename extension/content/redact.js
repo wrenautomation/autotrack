@@ -2,7 +2,8 @@
 /**
  * Secrets never leave the page. Two gates: the field (password inputs, names that say secret)
  * and the value (token shapes). Either one masks. Patterns copied from autobrowse
- * `src/recorder/redact.ts`; keep them in step.
+ * `src/recorder/redact.ts` and autotrack `src/privacy.ts`; `src/privacy.test.ts` fails when
+ * `SECRET_VALUES` here differs from the recorder's.
  *
  * Classic script: it sets `globalThis.__autotrack.redact`. In the extension that global lives in
  * the content script's isolated world (or the service worker), where page scripts can't see it.
@@ -107,6 +108,7 @@
   AT.redact = {
     REDACTED,
     SECRET_FIELD,
+    SECRET_VALUES,
     looksLikeSecretField,
     looksLikeSecretValue,
     redactText,
