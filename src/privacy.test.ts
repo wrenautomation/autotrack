@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import type { Element } from "./events.ts";
 import {
@@ -7,8 +9,18 @@ import {
   holdForFocus,
   makeGate,
   redactSecrets,
+  SECRET_VALUES,
   textOf,
 } from "./privacy.ts";
+
+describe("the extension's copy of the token shapes", () => {
+  it("matches SECRET_VALUES pattern for pattern (a classic script cannot import it)", () => {
+    const ctx: { __autotrack?: { redact: { SECRET_VALUES: RegExp[] } } } = {};
+    const file = new URL("../extension/content/redact.js", import.meta.url);
+    runInNewContext(readFileSync(file, "utf8"), ctx);
+    expect(ctx.__autotrack?.redact.SECRET_VALUES.map(String)).toEqual(SECRET_VALUES.map(String));
+  });
+});
 
 const el = (secure: boolean): Element => ({
   role: "textfield",
