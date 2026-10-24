@@ -10,36 +10,36 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
-  statSync,
 } from "node:fs";
 import { arch, release, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkFrames, openShots, ShotsCapturer } from "./capture.ts";
 import { type Config, dataDir, loadConfig, sessionsDir } from "./config.ts";
 import { type Command, lock, type Request, runningPid, send, serve } from "./control.ts";
 import { type Coords, coordsFor } from "./coords.ts";
 import { BEAT_MS, Heart, type Heartbeat, type ShipStatus } from "./heartbeat.ts";
+import { HelperClient, helperCommand, PACKAGE_ROOT, spawnHelper } from "./helper.ts";
 import { startHook, uiohook } from "./hook.ts";
 import { pinnedLevel } from "./level.ts";
 import { linuxDoctor, linuxPower, osRelease } from "./linux.ts";
 import { notify } from "./notify.ts";
 import { ocrHelper } from "./ocr.ts";
-import { helperCommand, openProbe, PACKAGE_ROOT } from "./probe.ts";
+import { openProbe } from "./probe.ts";
 import { ask } from "./prompt.ts";
 import { Recorder, type Status } from "./recorder.ts";
 import {
   checkShip,
+  countSegments,
   dirBytes,
   noShipper,
   type Shipper,
   s3Store,
-  countSegments as shipCountSegments,
   shipperFor,
 } from "./ship.ts";
 import { syntheticHook, syntheticRate } from "./synthetic.ts";
@@ -300,7 +300,7 @@ async function start(data: string): Promise<number> {
         paused: st.paused,
         level: st.level,
         memoryRestarts: st.memoryRestarts,
-        waiting: { segments: shipCountSegments(sessions).closed, bytes: dirBytes(sessions) },
+        waiting: { segments: countSegments(sessions).closed, bytes: dirBytes(sessions) },
         ship: lastShip,
         update: {
           checkedAt: u.checkedAt,
@@ -352,30 +352,6 @@ async function control(data: string, cmd: Command): Promise<number> {
   }
   console.log(JSON.stringify(r, null, 2));
   return 0;
-}
-
-function dirSize(dir: string): number {
-  if (!existsSync(dir)) return 0;
-  let total = 0;
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    const p = join(dir, e.name);
-    if (e.isDirectory()) total += dirSize(p);
-    else if (e.isFile()) total += statSync(p).size;
-  }
-  return total;
-}
-
-function countSegments(sessions: string): { open: number; closed: number } {
-  let open = 0;
-  let closed = 0;
-  if (!existsSync(sessions)) return { open, closed };
-  for (const s of readdirSync(sessions)) {
-    const dir = join(sessions, s);
-    if (!statSync(dir).isDirectory()) continue;
-    for (const seg of readdirSync(dir).filter((n) => /^\d{3,}$/.test(n)))
-      existsSync(join(dir, seg, ".done")) ? closed++ : open++;
-  }
-  return { open, closed };
 }
 
 const MEASURE_MS = 10_000;
@@ -436,7 +412,7 @@ async function measure(data: string): Promise<Cost> {
     const t = Date.now();
     const seen: Status[] = [];
     for (let i = 0; i < MEASURE_MS / 2000; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
+      await sleep(2000);
       const s = (await send(data, "status")) as Status | null;
       if (s?.pid === first.pid) seen.push(s);
     }
@@ -459,7 +435,7 @@ async function measure(data: string): Promise<Cost> {
   const sample = setInterval(() => {
     rss = Math.max(rss, process.memoryUsage().rss);
   }, 500);
-  await new Promise((r) => setTimeout(r, MEASURE_MS));
+  await sleep(MEASURE_MS);
   clearInterval(sample);
   const b = await recorder.statusNow();
   await recorder.stop();
@@ -533,7 +509,7 @@ async function doctor(data: string): Promise<number> {
       else line(l.good, l.msg);
     }
   } else if (process.platform === "win32") console.log("     permissions: none needed on Windows");
-  const size = dirSize(data);
+  const size = dirBytes(data);
   const segs = countSegments(sessionsDir(data));
   line(
     size < config.maxLocalGb * 1e9,
@@ -589,31 +565,15 @@ async function selftest(data: string): Promise<number> {
   };
   loadConfig(data);
   try {
-    await import("uiohook-napi");
+    await uiohook();
   } catch (e) {
-    return fail(`uiohook-napi: ${(e as Error).message}`);
+    return fail(`input hook: ${(e as Error).message}`);
   }
   const helper = helperCommand(process.platform, PACKAGE_ROOT, "ocr");
   if (!helper) return fail("helper missing");
-  const answer = await new Promise<string | null>((resolve) => {
-    const child = spawn(helper.cmd, helper.args, {
-      stdio: ["pipe", "pipe", "ignore"],
-      windowsHide: true,
-    });
-    let out = "";
-    const done = (v: string | null) => {
-      clearTimeout(t);
-      child.kill();
-      resolve(v);
-    };
-    const t = setTimeout(() => done(null), 15_000);
-    child.on("error", () => done(null));
-    child.stdout.on("data", (c: Buffer) => {
-      out += c;
-      if (out.includes("\n")) done(out.split("\n")[0] ?? "");
-    });
-    child.stdin.write(`${JSON.stringify({ id: 1, op: "usage" })}\n`);
-  });
+  const client = new HelperClient({ spawn: spawnHelper(helper), name: "selftest" });
+  const answer = await client.usage(15_000);
+  client.close();
   if (!answer) return fail("helper did not answer");
   console.log(`selftest ok ${VERSION}`);
   return 0;
@@ -704,7 +664,7 @@ async function uninstallCmd(data: string, args: string[]): Promise<number> {
             process.kill(pid);
           } catch {}
         }
-        await new Promise((r) => setTimeout(r, 100));
+        await sleep(100);
       }
     },
     hostUninstall: async () => {
