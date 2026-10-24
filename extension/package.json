@@ -8,7 +8,7 @@
     "test": "vitest run",
     "e2e": "vitest run --config vitest.e2e.config.mjs",
     "typecheck": "tsc --noEmit",
-    "lint": "biome check . ../host",
+    "lint": "biome check --error-on-warnings . ../host",
     "key": "node scripts/key.mjs",
     "icons": "node scripts/icons.mjs",
     "zip": "node scripts/pack.mjs"

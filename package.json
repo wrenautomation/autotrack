@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "autotrack": "node --experimental-strip-types src/cli.ts",
-    "lint": "biome check .",
+    "lint": "biome check --error-on-warnings .",
     "bundle": "node scripts/bundle.mjs"
   },
   "dependencies": {
