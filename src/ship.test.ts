@@ -10,6 +10,7 @@ import {
   checkShip,
   countSegments,
   DirShipper,
+  type FilesIndex,
   finishWaiting,
   type ObjectStore,
   PutError,
@@ -58,6 +59,15 @@ function memStore(failAfter = Infinity, status: number | null = null) {
   return { store, puts, calls: () => calls };
 }
 
+/** The files a segment's put `files.bin` holds, by name, read back through its `files.json`. */
+function unpack(puts: { key: string; body: Buffer }[], seg: string): Map<string, Buffer> {
+  const bin = puts.find((p) => p.key.endsWith(`${seg}/files.bin`))?.body;
+  const json = puts.find((p) => p.key.endsWith(`${seg}/files.json`))?.body;
+  if (!bin || !json) return new Map();
+  const index = JSON.parse(json.toString("utf8")) as FilesIndex;
+  return new Map(index.files.map((f) => [f.name, bin.subarray(f.at, f.at + f.size)]));
+}
+
 const shipper = (
   store: ObjectStore | null,
   extra: Partial<ConstructorParameters<typeof DirShipper>[0]> = {},
@@ -67,12 +77,11 @@ const shipper = (
     device: "laptop",
     maxLocalGb: 5,
     sleep: async () => {},
-    concurrency: 1,
     ...extra,
   });
 
 describe("DirShipper", () => {
-  it("puts trees gzipped after frames and before events, deleting each once put", async () => {
+  it("bundles frames and gzipped trees in files.bin, before events, and deletes the segment", async () => {
     const dir = session("20261013T100000-abcd", [{ events: 2, frames: [0], done: true }]);
     const trees = join(dir, "000", "trees");
     mkdirSync(trees);
@@ -83,25 +92,28 @@ describe("DirShipper", () => {
     await shipper(m.store).ship(sessions);
     expect(m.puts.map((p) => p.key.split("/").slice(2).join("/"))).toEqual([
       "session.json",
-      "000/frames/0.jpg",
-      "000/trees/2.txt.gz",
-      "000/trees/10.json.gz",
+      "000/files.bin",
+      "000/files.json",
       "000/events.jsonl.gz",
     ]);
-    expect(gunzipSync(m.puts[2]?.body ?? Buffer.alloc(0)).toString()).toBe("button Save");
-    expect(m.puts[2]?.type).toBe("application/gzip");
+    const files = unpack(m.puts, "000");
+    expect([...files.keys()]).toEqual(["frames/0.jpg", "trees/2.txt.gz", "trees/10.json.gz"]);
+    expect(gunzipSync(files.get("trees/2.txt.gz") ?? Buffer.alloc(0)).toString()).toBe(
+      "button Save",
+    );
+    expect(files.get("frames/0.jpg")).toEqual(Buffer.alloc(10, 0));
     expect(existsSync(join(dir, "000"))).toBe(false);
   });
 
-  it("a failed tree put keeps the trees not yet put and the events", async () => {
+  it("a failed index put keeps every file and the events", async () => {
     const dir = session("20261013T100000-abcd", [{ events: 2, frames: [], done: true }]);
     const trees = join(dir, "000", "trees");
     mkdirSync(trees);
     writeFileSync(join(trees, "0.json"), "{}");
     writeFileSync(join(trees, "1.json"), "{}");
-    const m = memStore(2); // session.json and tree 0 land, tree 1 fails
+    const m = memStore(2); // session.json and files.bin land, files.json fails
     await shipper(m.store).ship(sessions);
-    expect(existsSync(join(trees, "0.json"))).toBe(false);
+    expect(existsSync(join(trees, "0.json"))).toBe(true);
     expect(existsSync(join(trees, "1.json"))).toBe(true);
     expect(existsSync(join(dir, "000", "events.jsonl"))).toBe(true);
   });
@@ -116,10 +128,11 @@ describe("DirShipper", () => {
     expect(r).toMatchObject({ put: 1, failed: 0, objects: 4 });
     expect(m.puts.map((p) => p.key)).toEqual([
       "laptop/20261013T100000-abcd/session.json",
-      "laptop/20261013T100000-abcd/000/frames/0.jpg",
-      "laptop/20261013T100000-abcd/000/frames/1.jpg",
+      "laptop/20261013T100000-abcd/000/files.bin",
+      "laptop/20261013T100000-abcd/000/files.json",
       "laptop/20261013T100000-abcd/000/events.jsonl.gz",
     ]);
+    expect([...unpack(m.puts, "000").keys()]).toEqual(["frames/0.jpg", "frames/1.jpg"]);
     const events = gunzipSync(m.puts[3]?.body ?? Buffer.alloc(0))
       .toString("utf8")
       .trim()
@@ -127,8 +140,8 @@ describe("DirShipper", () => {
     expect(events).toHaveLength(3);
     expect(m.puts.map((p) => p.type)).toEqual([
       "application/json",
-      "image/jpeg",
-      "image/jpeg",
+      "application/octet-stream",
+      "application/json",
       "application/gzip",
     ]);
     expect(existsSync(join(dir, "000"))).toBe(false);
@@ -168,25 +181,29 @@ describe("DirShipper", () => {
     ]);
   });
 
-  it("a failed put keeps the segment, resumes where it stopped, and backs off", async () => {
+  it("a failed put keeps the segment, ships it whole next time, and backs off", async () => {
     const dir = session("20261013T100000-abcd", [{ events: 2, frames: [0, 1, 2], done: true }]);
     let now = 1_000_000;
-    const m = memStore(2); // session.json and frame 0 land, then offline
+    const m = memStore(2); // session.json and files.bin land, then offline
     const s = shipper(m.store, { now: () => now });
     const r = await s.ship(sessions);
     expect(r).toMatchObject({ put: 0, failed: 1 });
-    expect(existsSync(join(dir, "000", "frames", "0.jpg"))).toBe(false);
-    expect(existsSync(join(dir, "000", "frames", "1.jpg"))).toBe(true);
-    expect(m.calls()).toBe(5); // 2 landed, then frame 1 tried 3 times (no answer = retry)
+    expect(existsSync(join(dir, "000", "frames", "0.jpg"))).toBe(true);
+    expect(m.calls()).toBe(5); // 2 landed, then files.json tried 3 times (no answer = retry)
     expect((await s.ship(sessions)).skipped).toBe("backoff");
     now += 5 * 60_000;
     const ok = memStore();
     const s2 = shipper(ok.store);
     expect(await s2.ship(sessions)).toMatchObject({ put: 1, failed: 0 });
     expect(ok.puts.map((p) => p.key.split("/").slice(2).join("/"))).toEqual([
-      "000/frames/1.jpg",
-      "000/frames/2.jpg",
+      "000/files.bin",
+      "000/files.json",
       "000/events.jsonl.gz",
+    ]);
+    expect([...unpack(ok.puts, "000").keys()]).toEqual([
+      "frames/0.jpg",
+      "frames/1.jpg",
+      "frames/2.jpg",
     ]);
   });
 
@@ -229,7 +246,7 @@ describe("DirShipper", () => {
 });
 
 describe("quality files", () => {
-  it("puts crops, OCR gzipped and stats.json before events", async () => {
+  it("bundles crops and gzipped OCR, then stats.json, then events", async () => {
     const dir = session("20261013T100000-abcd", [{ events: 1, frames: [0], done: true }]);
     const seg = join(dir, "000");
     mkdirSync(join(seg, "crops"));
@@ -241,16 +258,23 @@ describe("quality files", () => {
     writeFileSync(join(seg, "stats.json"), '{"segment":"000"}');
     const m = memStore();
     await shipper(m.store).ship(sessions);
-    expect(m.puts.map((p) => [p.key.split("/").slice(2).join("/"), p.type])).toEqual([
-      ["session.json", "application/json"],
-      ["000/frames/0.jpg", "image/jpeg"],
-      ["000/crops/3.jpg", "image/jpeg"],
-      ["000/ocr/0.json.gz", "application/gzip"],
-      ["000/ocr/c3.json.gz", "application/gzip"],
-      ["000/stats.json", "application/json"],
-      ["000/events.jsonl.gz", "application/gzip"],
+    expect(m.puts.map((p) => p.key.split("/").slice(2).join("/"))).toEqual([
+      "session.json",
+      "000/files.bin",
+      "000/files.json",
+      "000/stats.json",
+      "000/events.jsonl.gz",
     ]);
-    expect(gunzipSync(m.puts[4]?.body ?? Buffer.alloc(0)).toString()).toBe('{"same":0}');
+    const files = unpack(m.puts, "000");
+    expect([...files.keys()]).toEqual([
+      "frames/0.jpg",
+      "crops/3.jpg",
+      "ocr/0.json.gz",
+      "ocr/c3.json.gz",
+    ]);
+    expect(gunzipSync(files.get("ocr/c3.json.gz") ?? Buffer.alloc(0)).toString()).toBe(
+      '{"same":0}',
+    );
   });
 
   it("with no recorder running, segments waiting for OCR are finished and ship", async () => {
@@ -333,7 +357,7 @@ describe("s3Store against the stub", () => {
       });
       expect(cfg.endpoint).toBe(stub.url);
       const r = await shipperFor(root, cfg).ship(sessions);
-      expect(r).toMatchObject({ put: 1, failed: 0, objects: 3 });
+      expect(r).toMatchObject({ put: 1, failed: 0, objects: 4 });
       const base = join(root, "s3", code.bucket, "laptop", "20261013T100000-abcd");
       expect(JSON.parse(readFileSync(join(base, "session.json"), "utf8")).endedAt).toBe(
         "2026-10-13T10:01:00Z",
@@ -341,7 +365,8 @@ describe("s3Store against the stub", () => {
       expect(gunzipSync(readFileSync(join(base, "000", "events.jsonl.gz"))).toString()).toContain(
         '"move"',
       );
-      expect(existsSync(join(base, "000", "frames", "0.jpg"))).toBe(true);
+      expect(existsSync(join(base, "000", "files.bin"))).toBe(true);
+      expect(existsSync(join(base, "000", "files.json"))).toBe(true);
       expect(existsSync(join(sessions, "20261013T100000-abcd"))).toBe(false);
 
       const bad = s3Store({

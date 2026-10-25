@@ -195,8 +195,11 @@ delays a probe answer. Node keeps slot numbers and hashes, never pixels.
 - Bucket `autobrowse-prod-track-<acct>` (`deploy/terraform/track.tf`, like `shots.tf`): private,
   AES256, versioning off; lifecycle → Glacier Instant Retrieval after 30 days (about $4 per TB a
   month, read in milliseconds when a training run wants it).
-- Key: `<device>/<session>/<segment>/events.jsonl.gz`, `…/frames/<n>.jpg`,
-  `…/trees/<n>.json.gz` (or `<n>.txt.gz` for a web snapshot), `<device>/<session>/session.json`.
+- Key: `<device>/<session>/<segment>/events.jsonl.gz`, `…/stats.json`, `…/files.bin` and
+  `…/files.json`, `<device>/<session>/session.json`. Since 0.4.0, files.bin holds the segment's
+  frames, crops, trees and OCR end to end, under their old names (`frames/<n>.jpg`,
+  `trees/<n>.json.gz`, …); files.json says where each sits. autobrowse `bundled` reads them as the
+  old per-file keys, so segments shipped before 0.4.0 still read.
 - `autobrowse autotrack enroll <device>` (William's Mac, his AWS user): IAM user `track-<device>` with
   only `s3:PutObject` on `<bucket>/<device>/*`; makes an access key; prints the one-line install
   command carrying `<bucket>`, `<device>` and the key. The key can write its own prefix and nothing
@@ -965,5 +968,10 @@ Soak on this Mac (read-only asks, no input sent), requests back to back:
   two, no FUSE, no root, one file for every distro, and it reuses `install.sh` unchanged.
 - The memory cap rides the governor's 2 s usage read (2026-10-16), not the 15 min heartbeat: no
   new asks, and a fast leak is caught within seconds. The heartbeat only reports it.
+- One files.bin per segment (2026-10-25, William, 0.4.0), not one object per file: ~300 puts a
+  segment came to ~40k puts a day ($0.20 a day) and most of the S3 bill. A small file also pays
+  Glacier IR's 128 KB minimum. Now 4 puts a segment. A failed put sends the whole segment again;
+  a segment is at most 5 minutes, so that is cheap. No tar: a JSON index and byte ranges need no
+  library on either side.
 - Wayland degraded over a portal port (2026-10-13): no passive global input exists there, so a
   portal would bring frames back and nothing else. `doctor` names the X11 session to pick.

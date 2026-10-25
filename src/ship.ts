@@ -1,19 +1,20 @@
 /**
  * Shipping closed segments off the laptop, to the layout autobrowse `src/autotrack/store.ts` reads:
  *
- *   <device>/<session>/session.json                  (put again whenever it changes, e.g. endedAt)
- *   <device>/<session>/<segment>/frames/<n>.jpg      (each deleted locally once put)
- *   <device>/<session>/<segment>/crops/<n>.jpg       (native crops at acts; deleted once put)
- *   <device>/<session>/<segment>/trees/<n>.json.gz   (accessibility trees, `.txt.gz` for a web
- *                                                     snapshot; each deleted locally once put)
- *   <device>/<session>/<segment>/ocr/<n>.json.gz     (OCR of frame n; `c<n>.json.gz` of crop n)
- *   <device>/<session>/<segment>/stats.json          (the segment's integrity stats)
- *   <device>/<session>/<segment>/events.jsonl.gz     (put last: the segment counts once it lands)
+ *   <device>/<session>/session.json            (put again whenever it changes, e.g. endedAt)
+ *   <device>/<session>/<segment>/files.bin     (the segment's images, trees and OCR, end to end)
+ *   <device>/<session>/<segment>/files.json    (where each one sits in files.bin; see `FilesIndex`)
+ *   <device>/<session>/<segment>/stats.json    (the segment's integrity stats)
+ *   <device>/<session>/<segment>/events.jsonl.gz (put last: the segment counts once it lands)
+ *
+ * Inside files.bin, names keep the layout segments had before 0.4.0, when each was its own object
+ * (S3 bills per put: ~300 a segment came to ~40k puts a day): `frames/<n>.jpg`, `crops/<n>.jpg`,
+ * `trees/<n>.json.gz` (`.txt.gz` for a web snapshot), `ocr/<n>.json.gz` (`c<n>.json.gz` of crop n).
  *
  * A segment is taken only once `.done` is in it, and deleted locally after its events land. A
- * failed put stops the pass (most often: offline); the next pass waits 5, 10, 20, … 60 minutes.
- * Past `maxLocalGb` the oldest frames and crops are deleted, never events. The secret is only ever
- * used to sign; nothing here logs a header.
+ * failed put stops the pass (most often: offline) and the whole segment goes again next pass,
+ * which waits 5, 10, 20, … 60 minutes. Past `maxLocalGb` the oldest frames and crops are deleted,
+ * never events. The secret is only ever used to sign; nothing here logs a header.
  */
 import { createHash } from "node:crypto";
 import {
@@ -40,6 +41,12 @@ export interface ShipResult {
   skipped?: "no code" | "backoff" | "busy";
   /** Why the pass stopped short. */
   error?: string;
+}
+
+/** `files.json`: each file of `files.bin` by name, at byte `at`, `size` bytes long. */
+export interface FilesIndex {
+  v: 1;
+  files: { name: string; at: number; size: number }[];
 }
 
 export interface Shipper {
@@ -287,8 +294,6 @@ export interface DirShipperOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Tries per object within a pass (default 3). */
   tries?: number;
-  /** Frames put at once (default 4). */
-  concurrency?: number;
 }
 
 const BACKOFF_MS = 5 * 60_000;
@@ -404,44 +409,42 @@ export class DirShipper implements Shipper {
     prefix: string,
     put: (key: string, body: Uint8Array, type: string) => Promise<void>,
   ): Promise<void> {
-    const queue: { path: string; key: string; gzip: boolean }[] = [
+    const files: { path: string; name: string; gzip: boolean }[] = [
       ...framesIn(segDir).map((f) => ({
         path: join(segDir, "frames", f.name),
-        key: `${prefix}/frames/${f.n}.jpg`,
+        name: `frames/${f.n}.jpg`,
         gzip: false,
       })),
       ...framesIn(segDir, "crops").map((f) => ({
         path: join(segDir, "crops", f.name),
-        key: `${prefix}/crops/${f.n}.jpg`,
+        name: `crops/${f.n}.jpg`,
         gzip: false,
       })),
       ...treesIn(segDir).map((name) => ({
         path: join(segDir, "trees", name),
-        key: `${prefix}/trees/${name}.gz`,
+        name: `trees/${name}.gz`,
         gzip: true,
       })),
       ...ocrIn(segDir).map((name) => ({
         path: join(segDir, "ocr", name),
-        key: `${prefix}/ocr/${name}.gz`,
+        name: `ocr/${name}.gz`,
         gzip: true,
       })),
     ];
-    let stop = false;
-    const worker = async () => {
-      for (let f = queue.shift(); f && !stop; f = queue.shift()) {
-        const p = f.path;
-        try {
-          const body = readFileSync(p);
-          if (f.gzip) await put(f.key, gzipSync(body), "application/gzip");
-          else await put(f.key, body, "image/jpeg");
-        } catch (e) {
-          stop = true;
-          throw e;
-        }
-        unlinkSync(p); // a retry later starts where this one stopped
+    if (files.length) {
+      const index: FilesIndex = { v: 1, files: [] };
+      const bodies: Buffer[] = [];
+      let at = 0;
+      for (const f of files) {
+        const raw = readFileSync(f.path);
+        const body = f.gzip ? gzipSync(raw) : raw;
+        index.files.push({ name: f.name, at, size: body.byteLength });
+        bodies.push(body);
+        at += body.byteLength;
       }
-    };
-    await Promise.all(Array.from({ length: this.o.concurrency ?? 4 }, worker));
+      await put(`${prefix}/files.bin`, Buffer.concat(bodies), "application/octet-stream");
+      await put(`${prefix}/files.json`, Buffer.from(JSON.stringify(index)), "application/json");
+    }
     const stats = join(segDir, "stats.json");
     if (existsSync(stats))
       await put(`${prefix}/stats.json`, readFileSync(stats), "application/json");

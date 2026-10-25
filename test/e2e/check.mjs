@@ -82,6 +82,22 @@ const files = (d) => {
     return [];
   }
 };
+/** A shipped segment's files.bin, by name through its files.json (none: an empty map). */
+const bundleOf = (segDir) => {
+  try {
+    const bin = readFileSync(join(segDir, "files.bin"));
+    const { files: index } = JSON.parse(readFileSync(join(segDir, "files.json"), "utf8"));
+    return new Map(index.map((f) => [f.name, bin.subarray(f.at, f.at + f.size)]));
+  } catch {
+    return new Map();
+  }
+};
+/** The names under `sub/` in a bundle, sorted. */
+const namesIn = (bundle, sub) =>
+  [...bundle.keys()]
+    .filter((k) => k.startsWith(`${sub}/`))
+    .map((k) => k.slice(sub.length + 1))
+    .sort();
 const isDir = (p) => {
   try {
     return statSync(p).isDirectory();
@@ -150,14 +166,15 @@ for (const s of sessions) {
       ev.seg = `${s}/${g}`;
       events.push(ev);
     }
-    for (const f of files(join(sdir, g, "trees"))) {
+    const bundle = bundleOf(join(sdir, g));
+    for (const f of namesIn(bundle, "trees")) {
       const m = /^(\d+)\.(json|txt)\.gz$/.exec(f);
       if (!m) {
         fail(`${s}/${g}/trees/${f}: want <n>.json.gz or <n>.txt.gz`);
         continue;
       }
       try {
-        const text = gunzipSync(readFileSync(join(sdir, g, "trees", f))).toString("utf8");
+        const text = gunzipSync(bundle.get(`trees/${f}`)).toString("utf8");
         raw += text;
         trees.set(`${s}/${g}/${m[1]}`, m[2] === "json" ? JSON.parse(text) : text);
       } catch (e) {
@@ -172,28 +189,28 @@ for (const s of sessions) {
     } catch (e) {
       fail(`${s}/${g}/stats.json missing or bad (${e.message})`);
     }
-    for (const f of files(join(sdir, g, "crops"))) {
-      const b = readFileSync(join(sdir, g, "crops", f));
+    for (const f of namesIn(bundle, "crops")) {
+      const b = bundle.get(`crops/${f}`);
       const size = b[0] === 0xff && b[1] === 0xd8 ? jpegSize(b) : null;
       if (!size || !/^\d+\.jpg$/.test(f)) fail(`${s}/${g}/crops/${f}: want <n>.jpg, a JPEG`);
       else crops.set(`${s}/${g}/${Number.parseInt(f, 10)}`, size);
     }
-    for (const f of files(join(sdir, g, "ocr"))) {
+    for (const f of namesIn(bundle, "ocr")) {
       const m = /^(c?\d+)\.json\.gz$/.exec(f);
       if (!m) {
         fail(`${s}/${g}/ocr/${f}: want <n>.json.gz or c<n>.json.gz`);
         continue;
       }
       try {
-        const text = gunzipSync(readFileSync(join(sdir, g, "ocr", f))).toString("utf8");
+        const text = gunzipSync(bundle.get(`ocr/${f}`)).toString("utf8");
         raw += text;
         ocr.set(`${s}/${g}/${m[1]}`, JSON.parse(text));
       } catch (e) {
         fail(`${s}/${g}/ocr/${f}: not gzip JSON (${e.message})`);
       }
     }
-    for (const f of files(join(sdir, g, "frames"))) {
-      const b = readFileSync(join(sdir, g, "frames", f));
+    for (const f of namesIn(bundle, "frames")) {
+      const b = bundle.get(`frames/${f}`);
       frames++;
       const framed =
         b.length > 4 && b[0] === 0xff && b[1] === 0xd8 && b.at(-2) === 0xff && b.at(-1) === 0xd9;
