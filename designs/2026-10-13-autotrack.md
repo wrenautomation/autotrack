@@ -982,3 +982,9 @@ Soak on this Mac (read-only asks, no input sent), requests back to back:
   device) or a failed script: no hold. Recording, the 15-minute heartbeat (one small put) and the
   `maxLocalGb` cap keep running; `autotrack ship` (force) still ships. A hold clears the backoff,
   so the first pass on wifi ships at once, every closed segment in one pass.
+
+2026-10-27: A text run's before frame is written when the run starts. The Mac helper keeps the last
+4 grabs; a typing run outlasts that, so 21-30% of text runs lost their before frame ("frame not
+saved", about 200 a day). A bigger ring costs about 8 MB a slot. The write still checks the gate,
+so a gated app's frame stays off disk. Opera and Opera GX read Chrome's native-host folder and
+registry key; the Mac installer now opens `opera://extensions` too.

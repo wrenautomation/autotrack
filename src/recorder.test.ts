@@ -806,6 +806,42 @@ describe("recorder quality", () => {
     ]);
   });
 
+  it("a text run longer than the helper's ring keeps its before frame", async () => {
+    // the Mac helper holds the last 4 grabs; a save of an older one answers "slot reused"
+    let seq = 0;
+    const capturer: Capturer = {
+      displays: () => [{ id: "1", x: 0, y: 0, width: 64, height: 36, scale: 1, primary: true }],
+      grab: async () => {
+        seq++;
+        return {
+          display: "1",
+          width: 64,
+          height: 36,
+          hash: seq.toString(16).padStart(16, "0"),
+          token: seq,
+        };
+      },
+      save: async (shot, path) => {
+        if (seq - (shot.token as number) >= 4) return "reused";
+        writeFileSync(path, new Uint8Array([0xff, 0xd8, 0xff, 0xd9]));
+        return true;
+      },
+    };
+    const r = setup({ deps: { capturer } });
+    r.typeText(100, "hello");
+    for (let t = 400; t <= 3000; t += 250) {
+      r.at(t);
+      await r.rec.ringTick();
+    }
+    r.rec.foldTick();
+    await r.rec.settled();
+    await r.rec.stop();
+    expect(r.events().find((e) => e.kind === "text")).toMatchObject({
+      text: "hello",
+      before: expect.any(Number),
+    });
+  });
+
   it("a click: fresh before at button-down, settled after, approach path, crop", async () => {
     const r = setup({ clocked: true });
     r.raw({ type: "move", t: 100, x: 10, y: 10 });

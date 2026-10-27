@@ -1,6 +1,6 @@
 /**
  * Registers the native messaging host with Chrome and Edge (and on Linux Chromium and Brave) for
- * this user (no admin).
+ * this user (no admin). Opera and Opera GX read Chrome's dir and registry key, so they need none.
  *
  * Mac and Linux: a manifest JSON in each browser's per-user `NativeMessagingHosts/` dir, pointing at a
  * `/bin/sh` wrapper that runs the bundled node on autotrack-host.mjs (a browser started from the

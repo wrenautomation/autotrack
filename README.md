@@ -62,9 +62,9 @@ no systemd session. Use an Xorg session. On Wayland it sees only some apps and p
 and `autotrack doctor` warns about it. OCR needs `tesseract` (`sudo apt install tesseract-ocr` or
 `sudo dnf install tesseract`); without it, frames are kept and not read.
 
-For page detail in Chrome, Edge or (on Linux) Chromium and Brave, load the autotrack extension. The installer unpacks it to
+For page detail in Chrome, Edge, Opera, Opera GX or (on Linux) Chromium and Brave, load the autotrack extension. The installer unpacks it to
 `extension/` in the data folder (see "Where the data goes"), copies that path to your clipboard,
-and opens `chrome://extensions` or `edge://extensions` for each browser it finds. There, turn on
+and opens `chrome://extensions`, `edge://extensions` or `opera://extensions` for each browser it finds. There, turn on
 Developer mode, click Load unpacked, and pick the folder. If autotrack is already listed after an
 update, press its reload button. The extension isn't on the Chrome Web Store yet.
 

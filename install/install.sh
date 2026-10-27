@@ -453,21 +453,25 @@ extension_help() {
   if [ "$STORE_LIVE" = 1 ]; then
     say "Browser clicks: add the autotrack extension to Chrome or Edge: $STORE_URL"
   elif [ -n "$ext" ]; then
-    say "Browser clicks: load the autotrack extension in Chrome or Edge."
+    say "Browser clicks: load the autotrack extension in Chrome, Edge, Opera or Opera GX."
     say "Folder: $ext"
     found=""
     if [ -z "${AUTOTRACK_NO_BROWSER:-}" ]; then
       have_app "Google Chrome" && found="$found chrome"
       have_app "Microsoft Edge" && found="$found edge"
+      have_app "Opera GX" && found="$found operagx"
+      have_app "Opera" && found="$found opera"
     fi
     if [ -n "$found" ]; then
       printf '%s' "$ext" | pbcopy 2>/dev/null && say "(Copied to your clipboard.)"
       case $found in *chrome*) browser_steps "Google Chrome" com.google.Chrome chrome ;; esac
       case $found in *edge*) browser_steps "Microsoft Edge" com.microsoft.edgemac edge ;; esac
+      case $found in *operagx*) browser_steps "Opera GX" com.operasoftware.OperaGX opera ;; esac
+      case "$found " in *" opera "*) browser_steps "Opera" com.operasoftware.Opera opera ;; esac
       say ""
       say "If autotrack is already listed there, press its reload button instead."
     else
-      say "Open chrome://extensions (or edge://extensions), turn on Developer mode, Load unpacked, pick that folder."
+      say "Open chrome://extensions (or edge://, opera://), turn on Developer mode, Load unpacked, pick that folder."
     fi
   fi
 }

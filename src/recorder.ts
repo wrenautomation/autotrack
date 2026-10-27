@@ -711,9 +711,12 @@ export class Recorder {
           return r?.element?.role ? r : a;
         });
     } else target = this.d.probe.focused();
+    // a click's before is the screen at button-down; a key's effect starts at key-down
+    const before = b.on === "point" && b.press ? this.screen.fresh() : this.screen.before();
+    // written now: a text run outlasts the helper's 4-grab ring, and its save then finds the slot reused
+    void before.then((f) => this.screen.number(f));
     return {
-      // a click's before is the screen at button-down; a key's effect starts at key-down
-      before: b.on === "point" && b.press ? this.screen.fresh() : this.screen.before(),
+      before,
       front: this.front(),
       target,
       ...(at ? { at } : {}),
