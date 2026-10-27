@@ -1001,3 +1001,8 @@ Soak on this Mac (read-only asks, no input sent), requests back to back:
 saved", about 200 a day). A bigger ring costs about 8 MB a slot. The write still checks the gate,
 so a gated app's frame stays off disk. Opera and Opera GX read Chrome's native-host folder and
 registry key; the Mac installer now opens `opera://extensions` too.
+
+2026-10-27: Windows holds uploads on a metered network too. It asks Windows for the internet
+connection's cost (WinRT NetworkCostType through powershell.exe, every upload pass): Fixed,
+Variable, roaming or near a data limit hold. Found by S3: william-pc uploaded about 1 GB on the
+hotspot this morning while the Mac held. The heartbeat carries `metered`, and `doctor` prints it.

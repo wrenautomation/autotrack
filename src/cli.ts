@@ -28,6 +28,7 @@ import { HelperClient, helperCommand, PACKAGE_ROOT, spawnHelper } from "./helper
 import { startHook, uiohook } from "./hook.ts";
 import { pinnedLevel } from "./level.ts";
 import { linuxDoctor, linuxPower, osRelease } from "./linux.ts";
+import { holdUploads } from "./metered.ts";
 import { notify } from "./notify.ts";
 import { ocrHelper } from "./ocr.ts";
 import { openProbe } from "./probe.ts";
@@ -216,10 +217,12 @@ async function start(data: string): Promise<number> {
   }
   const config = loadConfig(data, log);
   let lastShip: ShipStatus | null = null;
+  let metered = false;
   const shipper = shipperFor(data, config, log);
   const tracked: Shipper = {
     ship: async (dir) => {
       const r = await shipper.ship(dir);
+      if (r.skipped !== "backoff" && r.skipped !== "busy") metered = r.skipped === "metered";
       if (r.skipped !== "backoff" && r.skipped !== "busy" && r.skipped !== "metered")
         lastShip = {
           at: new Date().toISOString(),
@@ -306,6 +309,7 @@ async function start(data: string): Promise<number> {
         memoryRestarts: st.memoryRestarts,
         waiting: { segments: countSegments(sessions).closed, bytes: dirBytes(sessions) },
         ship: lastShip,
+        metered,
         update: {
           checkedAt: u.checkedAt,
           latest: u.latest,
@@ -474,6 +478,12 @@ async function doctor(data: string): Promise<number> {
   if (config.ship) {
     const put = await checkShip(config, VERSION);
     line(put.ok, put.message);
+    line(
+      true,
+      (await holdUploads())
+        ? "metered network: uploads wait until it is not"
+        : "network not metered: uploads run",
+    );
   }
   const mode = updateMode(data, config);
   const us = readState(data);

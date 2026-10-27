@@ -29,6 +29,8 @@ export interface Heartbeat {
   memoryRestarts: { count: number; last: MemoryRestart | null };
   waiting: { segments: number; bytes: number };
   ship: ShipStatus | null;
+  /** The last upload pass found a metered network and held. */
+  metered: boolean;
   update: Pick<UpdaterStatus, "checkedAt" | "latest" | "state" | "error"> | null;
 }
 

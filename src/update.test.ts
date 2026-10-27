@@ -345,6 +345,7 @@ describe("Heart", () => {
     memoryRestarts: { count: 0, last: null },
     waiting: { segments: 0, bytes: 0 },
     ship: null,
+    metered: false,
     update: null,
   });
 
