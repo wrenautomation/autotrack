@@ -306,6 +306,7 @@ const SHIPPED = ".session-shipped"; // sha256 of the session.json last put
 export class DirShipper implements Shipper {
   private failures = 0;
   private nextTry = 0;
+  private held = false;
   private readonly o: DirShipperOptions;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -345,7 +346,13 @@ export class DirShipper implements Shipper {
     const result: ShipResult = { put: 0, failed: 0, objects: 0, bytes: 0 };
     const store = this.o.store;
     if (!store) return { ...result, failed: countSegments(sessions).closed, skipped: "no code" };
-    if (!force && (await this.o.held?.())) {
+    const held = !force && (await this.o.held?.()) === true;
+    if (held !== this.held)
+      this.o.log?.(
+        held ? "ship: metered network, uploads wait" : "ship: unmetered, uploads resume",
+      );
+    this.held = held;
+    if (held) {
       // Failures on the hotspot say nothing about wifi: the first pass there ships at once.
       this.failures = 0;
       this.nextTry = 0;
