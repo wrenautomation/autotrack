@@ -1,6 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -119,7 +128,24 @@ describe("layout", () => {
     expect(() => pointApp(data, "9.9.9")).toThrow(/not unpacked/);
     version("0.3.0");
     mkdirSync(join(data, "app"));
-    expect(() => pointApp(data, "0.3.0")).toThrow(/real folder/);
+    expect(() => pointApp(data, "0.3.0", "linux")).toThrow(/real folder/);
+  });
+
+  it("on a Mac, trades the real app folder for a version by rename and back", () => {
+    renameSync(version("0.2.0"), join(data, "app"));
+    writeFileSync(join(data, "app", "node"), "old node");
+    version("0.3.0", { node: "new node" });
+    expect(currentVersion(data, "darwin")).toBe("0.2.0");
+    pointApp(data, "0.3.0", "darwin");
+    expect(lstatSync(join(data, "app")).isSymbolicLink()).toBe(false);
+    expect(currentVersion(data, "darwin")).toBe("0.3.0");
+    expect(readFileSync(join(data, "app", "node"), "utf8")).toBe("new node");
+    expect(readFileSync(join(versionsDir(data), "0.2.0", "node"), "utf8")).toBe("old node");
+    expect(existsSync(join(versionsDir(data), "0.3.0"))).toBe(false);
+    expect(() => pointApp(data, "0.3.0", "darwin")).toThrow(/not unpacked/);
+    pointApp(data, "0.2.0", "darwin"); // the rollback
+    expect(currentVersion(data, "darwin")).toBe("0.2.0");
+    expect(existsSync(join(versionsDir(data), "0.3.0", "package.json"))).toBe(true);
   });
 });
 
@@ -221,8 +247,8 @@ describe("stage", () => {
     for (const r of [hash, label, ok]) rmSync(r, { recursive: true, force: true });
   });
 
-  it("says unsupported on Mac", async () => {
-    expect(await stage({ ...opts(data), platform: "darwin", arch: "arm64" })).toEqual({
+  it("says unsupported where there is no bundle", async () => {
+    expect(await stage({ ...opts(data), platform: "aix", arch: "ppc64" })).toEqual({
       state: "unsupported",
     });
   });

@@ -49,13 +49,12 @@ installers carry it. Both verify its SHA-256 and set autotrack to start at login
 then open System Settings so you can allow Accessibility, Input Monitoring and Screen Recording
 for `node`, and wait until you have.
 
-Windows and Linux update themselves. About every 30 minutes autotrack checks the latest release. It
+autotrack updates itself. About every 30 minutes autotrack checks the latest release. It
 installs a new version only if the release is signed and every checksum matches, and only after
 the new version passes a self-test. It switches over when you've stopped typing for 2 minutes. If
 the new version fails to start 3 times, autotrack goes back to the old one and skips that version.
-Set `"update": "off"` in `config.json` to stop updates. To update now on Windows or Linux, run
-`autotrack update`. On a Mac, run the install line again, without `AUTOTRACK=`: it keeps the
-installed code. Mac updates itself once the app is signed.
+Set `"update": "off"` in `config.json` to stop updates. To update now, run `autotrack update`.
+On a Mac the app folder keeps its path, so the permissions you granted stay.
 
 On Linux it starts at login through a systemd user service, or an XDG autostart entry when there's
 no systemd session. Use an Xorg session. On Wayland it sees only some apps and part of the input,
@@ -75,7 +74,7 @@ update, press its reload button. The extension isn't on the Chrome Web Store yet
 - `autotrack pause` and `autotrack resume`.
 - `autotrack doctor`: checks setup, permissions, a test upload, CPU and memory.
 - `autotrack ship`: uploads now instead of waiting.
-- `autotrack update`: updates now (Windows and Linux). `--check` only says what's latest.
+- `autotrack update`: updates now. `--check` only says what's latest.
 - `autotrack uninstall`: removes the login item, the browser hookup and the app. If some
   recordings haven't been uploaded yet, it asks before deleting them. `--yes` skips the question.
 

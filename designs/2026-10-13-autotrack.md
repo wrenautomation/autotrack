@@ -870,10 +870,23 @@ Heartbeat:
   over 24 hours ago that never beat counts too. It posts again when the device comes back.
   `<state>/autotrack-health.json` keeps it from repeating.
 
-Mac, later: macOS ties Accessibility, Input Monitoring and Screen Recording to the exact node
-binary. A new binary after every update means granting all three again. So the Mac keeps its real
-`app` folder and the updater stays off there until the bundle is signed with a Developer ID. The
-heartbeat runs on the Mac too.
+Mac (2026-10-27): macOS keys Accessibility, Input Monitoring and Screen Recording to node's
+path and its signature's requirement (identifier `node`, OpenJS team), not to the file. Tested on
+William's Mac: a fresh copy of `app` at the same path, and node 24.20 in place of 24.21, both kept
+all three grants (frames, trees and input kept coming). So the Mac updates like the others, with
+one change: `app` stays a real folder, and an update trades it for `versions/<v>` by rename, so
+node's path never changes. Restart is a failed exit (75) that launchd's KeepAlive restarts.
+
+Options weighed, ranked by: grants survive updates > no hotspot cost > smallest change > the name
+in System Settings and a notarized installer.
+- A, chosen: rename swap at a fixed path, OpenJS's signature kept. No re-grant, no secret in CI.
+- B: re-sign node with William's Developer ID. Same result for updates, but one re-grant now, and
+  CI then needs the Developer ID key (a p12 in GitHub secrets) to keep the signature stable.
+- C: a real `autotrack.app` bundle with a bundle id: grants follow the bundle, System Settings
+  says "autotrack", not "node". The target once the installer is notarized; rework of install.sh,
+  the plist, helper paths and the host wrapper.
+The Developer ID (team LBJ38R6L4W) and the notary profile `autotrack` are on William's Mac; they
+serve C and a notarized dmg, not updates. The heartbeat runs on the Mac too.
 
 Tests:
 

@@ -146,10 +146,18 @@ function isLink(path: string): boolean | null {
   }
 }
 
-/** The version `app` points at; null when `app` is a real folder (Mac, an old install) or absent. */
-export function currentVersion(data: string): string | null {
+/**
+ * The version `app` points at. A Mac keeps a real folder: its package.json says. Null for a real
+ * folder elsewhere (an old install) or none.
+ */
+export function currentVersion(
+  data: string,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
   const app = appPath(data);
-  if (!isLink(app)) return null;
+  const link = isLink(app);
+  if (link === false && platform === "darwin") return versionOf(app);
+  if (!link) return null;
   try {
     return basename(readlinkSync(app).replace(/[\\/]+$/, ""));
   } catch {
@@ -169,7 +177,22 @@ function removeLink(path: string): void {
   }
 }
 
-/** Points `app` at `versions/<version>`. On Linux the swap is one rename. */
+function versionOf(dir: string): string | null {
+  try {
+    const v = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { version?: unknown })
+      .version;
+    return typeof v === "string" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Points `app` at `versions/<version>`. On Linux the swap is one rename. A Mac's `app` stays a
+ * real folder: macOS keys Accessibility, Input Monitoring and Screen Recording to node's path and
+ * signature, so the folders trade places by rename and node's path never changes (a new copy and a
+ * new node version both kept the grants, tested 2026-10-27).
+ */
 export function pointApp(
   data: string,
   version: string,
@@ -178,6 +201,19 @@ export function pointApp(
   const target = join(versionsDir(data), version);
   if (!existsSync(join(target, "package.json"))) throw new Error(`${target} is not unpacked`);
   const app = appPath(data);
+  if (platform === "darwin" && isLink(app) === false) {
+    const aside = join(versionsDir(data), versionOf(app) ?? "previous");
+    if (aside === target) throw new Error(`${app} already holds ${version}`);
+    rmSync(aside, { recursive: true, force: true });
+    renameSync(app, aside);
+    try {
+      renameSync(target, app);
+    } catch (e) {
+      renameSync(aside, app);
+      throw e;
+    }
+    return;
+  }
   if (isLink(app) === false) throw new Error(`${app} is a real folder: reinstall to update`);
   const next = `${app}.next`;
   removeLink(next);
@@ -304,7 +340,7 @@ export async function stage(o: StageOptions): Promise<StageResult> {
   const platform = o.platform ?? process.platform;
   const arch = o.arch ?? process.arch;
   const asset = assetFor(platform, arch);
-  if (!asset || platform === "darwin") return { state: "unsupported" };
+  if (!asset) return { state: "unsupported" };
   const at = new Date((o.now ?? Date.now)()).toISOString();
   const release = verifyRelease(
     await o.source.read("release.json"),
@@ -421,11 +457,12 @@ export function refreshExtension(data: string): boolean {
     rmSync(fresh, { recursive: true, force: true });
     if (existsSync(join(app, "extension", "manifest.json")))
       cpSync(join(app, "extension"), fresh, { recursive: true });
-    else if (process.platform === "win32" && existsSync(join(app, "extension.zip"))) {
+    else if (existsSync(join(app, "extension.zip"))) {
       mkdirSync(fresh);
-      execFileSync(winTar(), ["-xf", join(app, "extension.zip"), "-C", fresh], {
-        windowsHide: true,
-      });
+      const zip = join(app, "extension.zip");
+      if (process.platform === "win32")
+        execFileSync(winTar(), ["-xf", zip, "-C", fresh], { windowsHide: true });
+      else execFileSync("unzip", ["-q", zip, "-d", fresh]);
     } else return false;
     if (!existsSync(join(fresh, "manifest.json"))) return false;
     rmSync(old, { recursive: true, force: true });

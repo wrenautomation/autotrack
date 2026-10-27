@@ -162,10 +162,15 @@ async function openRecorder(
 
 /**
  * Start the app again: a launcher that restarts on RESTART_EXIT (the Windows .vbs loop, the
- * systemd unit) sets AUTOTRACK_SUPERVISED; otherwise the new process is started from here.
+ * systemd unit) sets AUTOTRACK_SUPERVISED; launchd (KeepAlive on a failed exit) sets
+ * XPC_SERVICE_NAME to its label. Otherwise the new process is started from here.
  */
 function relaunch(data: string, log: (msg: string) => void): never {
-  if (process.env.AUTOTRACK_SUPERVISED === "1") process.exit(RESTART_EXIT);
+  if (
+    process.env.AUTOTRACK_SUPERVISED === "1" ||
+    process.env.XPC_SERVICE_NAME === "com.wrenautomation.autotrack"
+  )
+    process.exit(RESTART_EXIT);
   const app = appPath(data);
   try {
     spawn(nodeIn(app), [join(app, "dist", "cli.js"), "start"], {
@@ -182,7 +187,6 @@ function relaunch(data: string, log: (msg: string) => void): never {
 
 /** auto, or why updates are off here. */
 function updateMode(data: string, config: Config): "auto" | string {
-  if (process.platform === "darwin") return "off on Mac until the app is signed";
   if (config.update === "off") return "off in config.json";
   if (process.env.AUTOTRACK_UPDATE === "off") return "off (AUTOTRACK_UPDATE)";
   if (!currentVersion(data)) return "off: this install has no versions folder; reinstall once";
