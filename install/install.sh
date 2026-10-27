@@ -3,6 +3,7 @@
 #
 #   AUTOTRACK='<install code>' sh -c "$(curl -fsSL https://raw.githubusercontent.com/wrenautomation/autotrack/main/install/install.sh)"
 #
+# To update, run the same line without AUTOTRACK: the installed config.json's code is kept.
 # The code comes from `autobrowse autotrack enroll <device>`. Other env, for tests:
 #   AUTOTRACK_BUNDLE         local path or URL of the bundle instead of the latest release;
 #                            SHA256SUMS is read from beside it. A folder works too: the bundle for
@@ -36,10 +37,6 @@ case $os in
   Darwin | Linux) ;;
   *) die "this installer is for Mac and Linux. On Windows, use install.ps1 (see the README)." ;;
 esac
-code=${AUTOTRACK:-}
-[ -n "$code" ] || die "AUTOTRACK is not set. Run the whole line that \`autobrowse autotrack enroll <device>\` printed."
-case $code in *[!A-Za-z0-9_-]*) die "AUTOTRACK is not an install code (base64url expected).";; esac
-
 arch=$(uname -m)
 if [ "$os" = Darwin ]; then
   [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ] && arch=arm64 # Rosetta shell
@@ -62,6 +59,15 @@ else
   unit="$config/systemd/user/$SERVICE"
   desktop="$config/autostart/autotrack.desktop"
 fi
+
+# An update needs no code: a device already installed keeps the one in its config.json.
+code=${AUTOTRACK:-}
+if [ -z "$code" ] && [ -f "$data/config.json" ]; then
+  code=$(sed -n 's/^ *"code": *"\([A-Za-z0-9_-]*\)".*/\1/p' "$data/config.json" | head -n 1)
+fi
+[ -n "$code" ] || die "AUTOTRACK is not set. Run the whole line that \`autobrowse autotrack enroll <device>\` printed."
+case $code in *[!A-Za-z0-9_-]*) die "AUTOTRACK is not an install code (base64url expected).";; esac
+export AUTOTRACK="$code"
 
 app="$data/app"
 uid=$(id -u)

@@ -827,7 +827,7 @@ Release trust:
 
 Update flow, inside the recorder:
 
-1. Check 2 to 10 minutes after start, then every 6 hours (±30 minutes). Source:
+1. Check 2 to 10 minutes after start, then every 30 minutes (±5 minutes). Source:
    `releases/latest/download/`, which skips prereleases.
 2. Newer: download the platform bundle, verify it, unpack into `versions/<v>.tmp`, rename to
    `versions/<v>`.

@@ -49,12 +49,13 @@ installers carry it. Both verify its SHA-256 and set autotrack to start at login
 then open System Settings so you can allow Accessibility, Input Monitoring and Screen Recording
 for `node`, and wait until you have.
 
-Windows and Linux update themselves. About every 6 hours autotrack checks the latest release. It
+Windows and Linux update themselves. About every 30 minutes autotrack checks the latest release. It
 installs a new version only if the release is signed and every checksum matches, and only after
 the new version passes a self-test. It switches over when you've stopped typing for 2 minutes. If
 the new version fails to start 3 times, autotrack goes back to the old one and skips that version.
-Set `"update": "off"` in `config.json` to stop updates. On a Mac, run the same command or installer
-again to update. Mac updates itself once the app is signed.
+Set `"update": "off"` in `config.json` to stop updates. To update now on Windows or Linux, run
+`autotrack update`. On a Mac, run the install line again, without `AUTOTRACK=`: it keeps the
+installed code. Mac updates itself once the app is signed.
 
 On Linux it starts at login through a systemd user service, or an XDG autostart entry when there's
 no systemd session. Use an Xorg session. On Wayland it sees only some apps and part of the input,

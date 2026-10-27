@@ -456,8 +456,9 @@ export interface UpdaterOptions {
 }
 
 export const FIRST_CHECK_MS = [2 * 60_000, 10 * 60_000] as const;
-export const CHECK_EVERY_MS = 6 * 3600_000;
-export const CHECK_JITTER_MS = 30 * 60_000;
+/** A check reads release.json (~550 bytes, one GitHub CDN request): every 30 minutes is cheap. */
+export const CHECK_EVERY_MS = 30 * 60_000;
+export const CHECK_JITTER_MS = 5 * 60_000;
 export const IDLE_BEFORE_MS = 2 * 60_000;
 export const FORCE_AFTER_MS = 24 * 3600_000;
 
