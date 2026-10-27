@@ -975,3 +975,10 @@ Soak on this Mac (read-only asks, no input sent), requests back to back:
   library on either side.
 - Wayland degraded over a portal port (2026-10-13): no passive global input exists there, so a
   portal would bring frames back and nothing else. `doctor` names the X11 session to pick.
+- Uploads hold on a metered network (2026-10-27, WA-898): on William's iPhone hotspot the
+  recorder sent ~1 MB/s. `~/.config/metered/metered.sh status` decides (hold on mode `on`, or
+  `auto` on a metered network), the same script autobrowse's desk asks; `src/metered.ts` repeats
+  that 1-line rule because autotrack takes no dependency on autobrowse. No script (every other
+  device) or a failed script: no hold. Recording, the 15-minute heartbeat (one small put) and the
+  `maxLocalGb` cap keep running; `autotrack ship` (force) still ships. A hold clears the backoff,
+  so the first pass on wifi ships at once, every closed segment in one pass.

@@ -10,6 +10,7 @@ import {
   checkShip,
   countSegments,
   DirShipper,
+  dirBytes,
   type FilesIndex,
   finishWaiting,
   type ObjectStore,
@@ -103,6 +104,37 @@ describe("DirShipper", () => {
     );
     expect(files.get("frames/0.jpg")).toEqual(Buffer.alloc(10, 0));
     expect(existsSync(join(dir, "000"))).toBe(false);
+  });
+
+  it("on a metered network puts nothing and keeps the cap; `force` and wifi ship at once", async () => {
+    const dir = session("20261013T100000-abcd", [
+      { events: 1, frames: [0, 1, 2], done: true, frameBytes: 400 },
+    ]);
+    let metered = true;
+    let now = 0;
+    const down = memStore(0);
+    const s = shipper(down.store, {
+      maxLocalGb: 800 / 1e9,
+      held: async () => metered,
+      now: () => now,
+    });
+    metered = false;
+    await s.ship(sessions); // a failed pass sets a backoff
+    metered = true;
+    writeFileSync(join(dir, "000", "frames", "3.jpg"), Buffer.alloc(400));
+    const r = await s.ship(sessions);
+    expect(r).toMatchObject({ put: 0, failed: 1, skipped: "metered" });
+    expect(r.dropped).toBeGreaterThan(0);
+    expect(dirBytes(sessions)).toBeLessThanOrEqual(800);
+    expect(existsSync(join(dir, "000", "events.jsonl"))).toBe(true);
+    const m = memStore();
+    const wifi = shipper(m.store, { held: async () => true });
+    expect((await wifi.ship(sessions, { force: true })).put).toBe(1);
+    // The hold cleared the backoff: the first pass on wifi tries, not waits.
+    session("20261013T110000-abcd", [{ events: 1, frames: [], done: true }]);
+    metered = false;
+    now = 1;
+    expect((await s.ship(sessions)).skipped).toBeUndefined();
   });
 
   it("a failed index put keeps every file and the events", async () => {
@@ -356,7 +388,7 @@ describe("s3Store against the stub", () => {
         endpoint: stub.url,
       });
       expect(cfg.endpoint).toBe(stub.url);
-      const r = await shipperFor(root, cfg).ship(sessions);
+      const r = await shipperFor(root, cfg, undefined, async () => false).ship(sessions);
       expect(r).toMatchObject({ put: 1, failed: 0, objects: 4 });
       const base = join(root, "s3", code.bucket, "laptop", "20261013T100000-abcd");
       expect(JSON.parse(readFileSync(join(base, "session.json"), "utf8")).endedAt).toBe(

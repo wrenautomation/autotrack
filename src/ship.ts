@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import type { Config, TrackCode } from "./config.ts";
 import { finishSegment, readStats } from "./journal.ts";
+import { holdUploads } from "./metered.ts";
 import { sha256Hex, sign } from "./sigv4.ts";
 
 export interface ShipResult {
@@ -38,7 +39,7 @@ export interface ShipResult {
   objects?: number; // objects put
   bytes?: number; // bytes put
   dropped?: number; // frames deleted locally to stay under maxLocalGb
-  skipped?: "no code" | "backoff" | "busy";
+  skipped?: "no code" | "backoff" | "busy" | "metered";
   /** Why the pass stopped short. */
   error?: string;
 }
@@ -294,6 +295,8 @@ export interface DirShipperOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Tries per object within a pass (default 3). */
   tries?: number;
+  /** True while the network is metered: uploads wait, the local cap still runs (`metered.ts`). */
+  held?: () => Promise<boolean>;
 }
 
 const BACKOFF_MS = 5 * 60_000;
@@ -342,6 +345,12 @@ export class DirShipper implements Shipper {
     const result: ShipResult = { put: 0, failed: 0, objects: 0, bytes: 0 };
     const store = this.o.store;
     if (!store) return { ...result, failed: countSegments(sessions).closed, skipped: "no code" };
+    if (!force && (await this.o.held?.())) {
+      // Failures on the hotspot say nothing about wifi: the first pass there ships at once.
+      this.failures = 0;
+      this.nextTry = 0;
+      return { ...result, failed: countSegments(sessions).closed, skipped: "metered" };
+    }
     if (!force && this.now() < this.nextTry)
       return { ...result, failed: countSegments(sessions).closed, skipped: "backoff" };
     const put = async (key: string, body: Uint8Array, type: string) => {
@@ -470,7 +479,12 @@ export class DirShipper implements Shipper {
 }
 
 /** The shipper for a data dir's config: S3 when the install code is in, else only the cap. */
-export function shipperFor(data: string, config: Config, log?: (msg: string) => void): DirShipper {
+export function shipperFor(
+  data: string,
+  config: Config,
+  log?: (msg: string) => void,
+  held: () => Promise<boolean> = () => holdUploads(),
+): DirShipper {
   return new DirShipper({
     store: config.ship
       ? s3Store({ code: config.ship, ...(config.endpoint ? { endpoint: config.endpoint } : {}) })
@@ -478,6 +492,7 @@ export function shipperFor(data: string, config: Config, log?: (msg: string) => 
     device: config.ship?.device ?? config.device,
     maxLocalGb: config.maxLocalGb,
     lockPath: join(data, "ship.lock"),
+    held,
     ...(log ? { log } : {}),
   });
 }

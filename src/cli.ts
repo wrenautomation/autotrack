@@ -216,7 +216,7 @@ async function start(data: string): Promise<number> {
   const tracked: Shipper = {
     ship: async (dir) => {
       const r = await shipper.ship(dir);
-      if (r.skipped !== "backoff" && r.skipped !== "busy")
+      if (r.skipped !== "backoff" && r.skipped !== "busy" && r.skipped !== "metered")
         lastShip = {
           at: new Date().toISOString(),
           ok: !r.failed && !r.skipped,
