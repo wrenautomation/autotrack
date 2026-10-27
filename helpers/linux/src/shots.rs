@@ -1,6 +1,6 @@
 //! --shots: frames. Ops: displays, grab, save, crop, usage. See designs/2026-10-13-autotrack.md
 //! "Shots protocol". A grab is an MIT-SHM `GetImage` of one RandR monitor (plain `GetImage` when
-//! SHM is missing), box-filtered down to 1920 px at most on the long side into one of 4 RGB slots;
+//! SHM is missing), box-filtered down to 1280 px at most on the long side into one of 4 RGB slots;
 //! save writes a JPEG (path.tmp, then rename). On X11 points are pixels: `os.scale` is 1. A crop
 //! is a plain `GetImage` of one rect at native pixels, no stretch.
 
@@ -13,7 +13,7 @@ use x11rb::protocol::shm::ConnectionExt as _;
 use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, ImageOrder, Window};
 use x11rb::rust_connection::RustConnection;
 
-pub const MAX_SIDE: u32 = 1920;
+pub const MAX_SIDE: u32 = 1280;
 const RING: usize = 4;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,7 +62,7 @@ impl Pix {
     }
 }
 
-/// Frame size: the long side at most 1920, rounded half away from zero, at least 1.
+/// Frame size: the long side at most 1280, rounded half away from zero, at least 1.
 pub fn fit_size(w: u32, h: u32) -> (u32, u32) {
     let k = (MAX_SIDE as f64 / w.max(h).max(1) as f64).min(1.0);
     let r = |v: u32| ((v as f64 * k).round() as u32).max(1);
@@ -483,12 +483,12 @@ mod tests {
 
     #[test]
     fn fit_rule() {
-        assert_eq!(fit_size(1920, 1080), (1920, 1080));
-        assert_eq!(fit_size(3840, 2160), (1920, 1080));
-        assert_eq!(fit_size(2560, 1440), (1920, 1080));
-        assert_eq!(fit_size(2880, 1800), (1920, 1200));
-        assert_eq!(fit_size(1080, 2400), (864, 1920));
-        assert_eq!(fit_size(5000, 1), (1920, 1));
+        assert_eq!(fit_size(1280, 720), (1280, 720));
+        assert_eq!(fit_size(3840, 2160), (1280, 720));
+        assert_eq!(fit_size(2560, 1440), (1280, 720));
+        assert_eq!(fit_size(2880, 1800), (1280, 800));
+        assert_eq!(fit_size(1080, 2400), (576, 1280));
+        assert_eq!(fit_size(5000, 1), (1280, 1));
         assert_eq!(fit_size(1280, 800), (1280, 800));
     }
 
@@ -497,7 +497,7 @@ mod tests {
         let d = Display { id: "533".into(), x: 1920, y: 0, w: 2560, h: 1440, primary: false };
         assert_eq!(
             display_json(&d),
-            r#"{"id":"533","x":1920,"y":0,"width":2560,"height":1440,"scale":0.75,"primary":false,"os":{"x":1920,"y":0,"width":2560,"height":1440,"scale":1}}"#
+            r#"{"id":"533","x":1920,"y":0,"width":2560,"height":1440,"scale":0.5,"primary":false,"os":{"x":1920,"y":0,"width":2560,"height":1440,"scale":1}}"#
         );
     }
 

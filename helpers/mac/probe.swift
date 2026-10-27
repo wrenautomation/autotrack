@@ -472,14 +472,14 @@ func handle(_ req: [String: Any]) -> [String: Any]? {
 // MARK: - Shots mode (`probe --shots`)
 //
 // ops: displays | grab {display} | save {slot, seq?, path, quality?}. A grab captures the display, scales
-// it to at most 1920 px on the long side into one of 4 ring slots (memory only) and answers its slot,
+// it to at most 1280 px on the long side into one of 4 ring slots (memory only) and answers its slot,
 // seq, size and a 64-bit hash. A save encodes a slot to a JPEG (path.tmp, then rename). Pixels never
 // reach the parent process.
 
-let shotsMaxSide = 1920
+let shotsMaxSide = 1280
 let ringSize = 4
 
-/// Same rule as the recorder: long side at most 1920, aspect kept.
+/// Same rule as the recorder: long side at most 1280, aspect kept.
 func fitSize(_ w: Int, _ h: Int) -> (Int, Int) {
     let k = min(1.0, Double(shotsMaxSide) / Double(max(w, h)))
     return (max(1, Int((Double(w) * k).rounded())), max(1, Int((Double(h) * k).rounded())))
@@ -682,7 +682,7 @@ func writeJPEG(_ image: CGImage, _ path: String, _ q: Double) -> String? {
 
 // Crop: one rect of a display at its native pixels. SCK `sourceRect` (display-local points) with the
 // output sized to the rect's pixels; the fallback is CGDisplayCreateImageForRect, looked up like the
-// full-display one. Both answer native pixels, so small text the 1920 px frame loses stays readable.
+// full-display one. Both answer native pixels, so small text the 1280 px frame loses stays readable.
 typealias DisplayRectImageFn = @convention(c) (CGDirectDisplayID, CGRect) -> Unmanaged<CGImage>?
 let displayRectImageFn: DisplayRectImageFn? = {
     guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGDisplayCreateImageForRect") else { return nil }

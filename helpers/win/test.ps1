@@ -1,7 +1,7 @@
 # Windows helper test: builds autotrack-helper.exe (build.ps1), starts it with --probe, opens its own
 # text box window (test-form.ps1), checks perm, front, focused, at on the text box, bad input, `at`
 # latency over 50 requests, the form's tree, a message box as front.dialog, pushed clipboard events,
-# usage, power and idle RSS. Then `--shots`: displays, grab, save (JPEG, at most 1920 px), crop
+# usage, power and idle RSS. Then `--shots`: displays, grab, save (JPEG, at most 1280 px), crop
 # (native pixels), usage, the ring, timing and RSS; then `--ocr` on test/fixtures/ocr-text.jpg
 # (known text). Exits 1 and prints every failure.
 # Run: powershell -NoProfile -ExecutionPolicy Bypass -File test.ps1   (Windows PowerShell 5.1)
@@ -309,7 +309,7 @@ try {
         $head = [System.IO.File]::ReadAllBytes($path)
         Check ($head.Length -gt 1000 -and $head[0] -eq 0xFF -and $head[1] -eq 0xD8) "${what}: not a JPEG (FFD8)"
         $img = [System.Drawing.Image]::FromFile($path)
-        try { Check ([math]::Max($img.Width, $img.Height) -le 1920) "${what}: $($img.Width)x$($img.Height) is over 1920 on the long side" }
+        try { Check ([math]::Max($img.Width, $img.Height) -le 1280) "${what}: $($img.Width)x$($img.Height) is over 1280 on the long side" }
         finally { $img.Dispose() }
     }
 
@@ -337,7 +337,7 @@ try {
     $g = Ask-Shots @{ op = 'grab'; display = $main.id }
     Check (-not $g.error) "grab: $($g.error)"
     Check ($g.slot -ge 0 -and $g.slot -lt 4) 'grab: slot is not 0..3'
-    Check ([math]::Max($g.w, $g.h) -le 1920) "grab: $($g.w)x$($g.h) is over 1920"
+    Check ([math]::Max($g.w, $g.h) -le 1280) "grab: $($g.w)x$($g.h) is over 1280"
     Check ($g.hash -match '^[0-9a-f]{16}$') "grab: hash '$($g.hash)' is not 16 hex digits"
     Check ([math]::Abs($main.scale - $g.w / $main.width) -lt 0.01) 'displays scale is not frame pixels per point'
 

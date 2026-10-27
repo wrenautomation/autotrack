@@ -44,7 +44,7 @@ const hamming = (a, b) => {
   return n;
 };
 const dir = mkdtempSync(join(tmpdir(), "autotrack-shots-"));
-/** The display's native pixel width, read apart from the helper (frames are fit to 1920 px, crops not). */
+/** The display's native pixel width, read apart from the helper (frames are fit to 1280 px, crops not). */
 const displayPixels = (id) => {
   try {
     const out = execFileSync(
@@ -97,8 +97,8 @@ try {
   check(!g.error, `grab: ${g.error}`);
   check(Number.isInteger(g.slot) && g.slot >= 0 && g.slot < 4, "grab slot 0..3");
   check(
-    isNum(g.w) && isNum(g.h) && Math.max(g.w, g.h) <= 1920,
-    "grab size at most 1920 on the long side",
+    isNum(g.w) && isNum(g.h) && Math.max(g.w, g.h) <= 1280,
+    "grab size at most 1280 on the long side",
   );
   check(/^[0-9a-f]{16}$/.test(g.hash ?? ""), "grab hash is 16 hex digits");
   check(Math.abs(g.w / g.h - main.width / main.height) < 0.01, "grab keeps the display's aspect");

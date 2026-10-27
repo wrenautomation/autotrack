@@ -85,7 +85,7 @@ update, press its reload button. The extension isn't on the Chrome Web Store yet
 - The app, the window title, and the role and label of the element under the pointer. Not what
   the element contains.
 - Screenshots right before and after each action, and every 2 seconds at most while the screen
-  changes without input. Each one is JPEG, at most 1920 px on a side.
+  changes without input. Each one is JPEG, at most 1280 px on a side.
 - With the extension: the page, the element you clicked, and what the click did.
 
 ## What it never records

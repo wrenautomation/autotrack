@@ -1,6 +1,6 @@
 // --shots: frames. Ops: displays, grab, save, crop, usage. See designs/2026-10-13-autotrack.md
 // "Shots protocol". A BitBlt from the screen DC (CAPTUREBLT) with a HALFTONE stretch to at most
-// 1920 px on the long side lands in one of 4 DIB sections; save writes a JPEG (System.Drawing,
+// 1280 px on the long side lands in one of 4 DIB sections; save writes a JPEG (System.Drawing,
 // path.tmp then rename). Displays are logical points (physical / DPI scale), `os` is the physical
 // rect and DPI scale. A crop is a plain BitBlt of one rect (logical points x DPI) at physical
 // pixels, no stretch.
@@ -50,7 +50,7 @@ static class Shots {
     [DllImport("gdi32.dll")] static extern bool StretchBlt(IntPtr dst, int dx, int dy, int dw, int dh, IntPtr src, int sx, int sy, int sw, int sh, uint rop);
     [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dst, int dx, int dy, int dw, int dh, IntPtr src, int sx, int sy, uint rop);
 
-    const int MaxSide = 1920;
+    const int MaxSide = 1280;
     const int RingSize = 4;
     const uint SrcCopy = 0x00CC0020;
     const uint CaptureBlt = 0x40000000;

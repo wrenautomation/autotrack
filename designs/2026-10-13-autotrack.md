@@ -1006,3 +1006,9 @@ registry key; the Mac installer now opens `opera://extensions` too.
 connection's cost (WinRT NetworkCostType through powershell.exe, every upload pass): Fixed,
 Variable, roaming or near a data limit hold. Found by S3: william-pc uploaded about 1 GB on the
 hotspot this morning while the Mac held. The heartbeat carries `metered`, and `doctor` prints it.
+
+2026-10-27: Frames are at most 1280 px on the long side, not 1920 (William: "just need a store",
+text must stay sharp). Frames were 98% of the bytes, about 390 KB each. At 1280 a Mac frame is
+1280x831 and about 220 KB (-45%); small terminal text stays readable. 1000 px was refused: on a
+1920x1080 PC screen it makes 12 px text about 6 px. JPEG quality stays 70. Crops keep native
+pixels for fine text. Old frames stay at their size.

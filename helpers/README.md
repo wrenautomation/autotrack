@@ -10,11 +10,11 @@ Elements carry `path` (up to 6 ancestors below the window, nearest first), and `
 
 ## Shots mode
 
-`mac/probe --shots` and `win\autotrack-helper.exe --shots` are a second helper for frames: `displays`, `grab` (into a ring of the last 4, at most 1920 px, with a 64-bit hash) and `save` (JPEG via a temp file and rename). `src/capture.ts` talks to it; the protocol is in `designs/2026-10-13-autotrack.md` under "Shots protocol". Mac uses ScreenCaptureKit on macOS 14+ (about 75 ms wall, 2.5 ms CPU, 55 MB RSS per grab) and falls back to `CGDisplayCreateImage` (about 40 ms CPU, 210 to 350 MB RSS). `AUTOTRACK_SHOTS_CG=1` forces the fallback and `AUTOTRACK_SHOTS_SCK=1` forces SCK, for measuring.
+`mac/probe --shots` and `win\autotrack-helper.exe --shots` are a second helper for frames: `displays`, `grab` (into a ring of the last 4, at most 1280 px, with a 64-bit hash) and `save` (JPEG via a temp file and rename). `src/capture.ts` talks to it; the protocol is in `designs/2026-10-13-autotrack.md` under "Shots protocol". Mac uses ScreenCaptureKit on macOS 14+ (about 75 ms wall, 2.5 ms CPU, 55 MB RSS per grab) and falls back to `CGDisplayCreateImage` (about 40 ms CPU, 210 to 350 MB RSS). `AUTOTRACK_SHOTS_CG=1` forces the fallback and `AUTOTRACK_SHOTS_SCK=1` forces SCK, for measuring.
 
-`mac/test.sh` also runs `mac/test-shots.mjs` (shapes, JPEG magic, ring reuse, p50/p95 per grab and save, helper RSS); it needs Screen Recording granted to the terminal. `win\test.ps1` runs the same checks against `--shots` (JPEG starts with FFD8, at most 1920 px, ring, timing).
+`mac/test.sh` also runs `mac/test-shots.mjs` (shapes, JPEG magic, ring reuse, p50/p95 per grab and save, helper RSS); it needs Screen Recording granted to the terminal. `win\test.ps1` runs the same checks against `--shots` (JPEG starts with FFD8, at most 1280 px, ring, timing).
 
-Shots mode also answers `crop` (one rect of a display at its native pixels, JPEG, for small text the 1920 px frame loses) and every mode answers `usage` (the helper's own CPU ms and RSS). The Windows probe answers `power` (`GetSystemPowerStatus`).
+Shots mode also answers `crop` (one rect of a display at its native pixels, JPEG, for small text the 1280 px frame loses) and every mode answers `usage` (the helper's own CPU ms and RSS). The Windows probe answers `power` (`GetSystemPowerStatus`).
 
 ## OCR mode
 
