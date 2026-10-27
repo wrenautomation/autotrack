@@ -689,12 +689,16 @@ async function uninstallCmd(data: string, args: string[]): Promise<number> {
 }
 
 const USAGE =
-  "usage: autotrack start|stop|pause|resume|status|task|ship|doctor|update|selftest|uninstall";
+  "usage: autotrack start|stop|pause|resume|status|task|ship|doctor|update|selftest|uninstall|-v";
 
 export async function main(argv: string[]): Promise<number> {
   const cmd = argv[0];
   const data = dataDir();
   switch (cmd) {
+    case "-v":
+    case "--version":
+      console.log(VERSION);
+      return 0;
     case "start":
       return start(data);
     case "stop":

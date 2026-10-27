@@ -71,6 +71,7 @@ update, press its reload button. The extension isn't on the Chrome Web Store yet
 
 - Ctrl+Alt+Shift+P pauses or resumes. A notification shows which.
 - `autotrack status`: is it running, and is it paused.
+- `autotrack -v`: the installed version.
 - `autotrack pause` and `autotrack resume`.
 - `autotrack doctor`: checks setup, permissions, a test upload, CPU and memory.
 - `autotrack ship`: uploads now instead of waiting.
